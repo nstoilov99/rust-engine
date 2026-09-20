@@ -308,6 +308,7 @@ impl BlendSpacePreview {
             clip_for,
             &mut skel.local_transforms,
             &mut self.scratch,
+            0,
         );
         skel.compute_palette();
     }

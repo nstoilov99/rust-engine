@@ -17,7 +17,7 @@
 //! chains are declared; no extra component to attach. The system inserts
 //! `IkTargets` itself when missing.
 
-use crate::engine::animation::graph::machine::AnimEventFire;
+use crate::engine::animation::graph::machine::{whole_body_slot, AnimEventFire};
 use crate::engine::animation::graph::runner::{
     AnimGraphRuntime, HeldContact, IkTarget, IkTargets, RELEASE_SECS,
 };
@@ -131,6 +131,14 @@ pub fn place_feet(
 
     let inv = entity_render.inverse();
     let entity_z = convert_position_yup_to_zup(entity_render.w_axis.truncate()).z;
+    // Interruption rule (b), Task 41.7 / U1: a **whole-body** Play Once
+    // started on the last tick (the slot's `started` read surface) — its
+    // overlay will hide the walk, and a suppressed `_up` would strand the
+    // lock. A masked Play Once never touches locks.
+    let whole_body_started = rt
+        .slot
+        .started()
+        .is_some_and(|s| whole_body_slot(&rt.plan, s));
     // The lowest contact below the entity's ground plane decides the pelvis
     // drop (0 = nothing below). The reference is the entity's plane, not the
     // foot's current height: clips plant feet on that plane, and the swing
@@ -163,7 +171,7 @@ pub fn place_feet(
         // A down edge with no ground under the foot does not latch.
         // The state that planted the foot has been left (a stop into Idle,
         // a jump): its `_up` will never come, so let go here.
-        if foot.locked && foot.lock_state != rt.machine.current_state() {
+        if foot.locked && (foot.lock_state != rt.machine.current_state() || whole_body_started) {
             foot.unlock();
             rt.throttle.force_eval_external = true;
         }
@@ -382,6 +390,9 @@ mod tests {
         AnimGraphRuntime {
             graph: String::new(),
             machine: AnimMachine::new(&plan),
+            extra_machines: Vec::new(),
+            root_clocks: Vec::new(),
+            masks: Default::default(),
             slot: PlayOnceSlot::new(),
             params: AnimParams::default(),
             events: Vec::new(),

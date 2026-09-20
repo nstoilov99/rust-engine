@@ -2597,10 +2597,15 @@ impl GraphEditorState {
         let mut doc = load_graph(abs_path).map_err(|e| e.to_string())?;
         migrate_doc(&mut doc, registry).map_err(|e| e.to_string())?;
         let domain = GraphDomain::of_path(content_rel_key);
-        let upgraded = if domain.is_animation() {
-            crate::engine::animation::graph::upgrade_any_state(&mut doc)
+        let (upgraded, pipeline) = if domain.is_animation() {
+            (
+                crate::engine::animation::graph::upgrade_any_state(&mut doc),
+                // Task 41.7 D5: a machine-only document gets its implicit
+                // pipeline root (State Machine → slots → chains → Output).
+                crate::engine::animation::graph::upgrade_pipeline_root(&mut doc),
+            )
         } else {
-            0
+            (0, false)
         };
         let mut state = Self::from_doc(content_rel_key.to_string(), doc, domain, registry);
         if upgraded > 0 {
@@ -2610,6 +2615,11 @@ impl GraphEditorState {
                 "Upgraded {upgraded} Any State node{} to aliases",
                 if upgraded == 1 { "" } else { "s" }
             ));
+        }
+        if pipeline {
+            state.migrated = true;
+            state.dirty = true;
+            state.toast("Upgraded to pipeline root");
         }
         Ok(state)
     }

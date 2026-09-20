@@ -1300,7 +1300,7 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
     let mut scratch = PoseScratch::new();
 
     m.tick(&plan, &mut params, 0.1);
-    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
     assert_eq!(pose[0].translation.x, 0.0, "entry state pose");
 
     params.set_bool("walk", true);
@@ -1308,7 +1308,7 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.05); // elapsed 0.25 of 0.5 → weight 0.5
-    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
     assert!(
         (pose[0].translation.x - 5.0).abs() < 1e-4,
         "halfway through the fade the pose is halfway between the clips, got {}",
@@ -1319,7 +1319,7 @@ fn crossfade_blends_pose_values_on_a_synthetic_skeleton() {
 
     // Fade done → pure Walk pose.
     m.tick(&plan, &mut params, 0.3);
-    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
     assert!((pose[0].translation.x - 10.0).abs() < 1e-4);
 }
 
@@ -1375,7 +1375,7 @@ fn blend1d_endpoints_play_pure_clips_and_midpoints_blend_proportionally() {
         (1.5, 4.0),   // quarter: 0.75·Walk + 0.25·Run
     ] {
         params.set_float("speed", speed);
-        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
         assert!(
             (pose[0].translation.x - expected).abs() < 1e-4,
             "speed {speed}: pose {} expected {expected}",
@@ -1415,7 +1415,7 @@ fn blend2d_blends_the_directionally_adjacent_children() {
     ] {
         params.set_float("dir_x", x);
         params.set_float("dir_y", y);
-        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
         assert!(
             (pose[0].translation.x - expected).abs() < 1e-3,
             "({x}, {y}): pose {} expected {expected} — {why}",
@@ -1446,7 +1446,7 @@ fn sync_group_keeps_cyclic_clips_phase_aligned_as_weights_shift() {
         // changes mid-sweep, and the phase must never jump.
         params.set_float("speed", 6.0 * step as f32 / 29.0);
         m.tick(&plan, &mut params, 0.05);
-        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
         let expected = m.time().rem_euclid(1.0);
         assert!(
             (pose[0].translation.x - expected).abs() < 1e-3,
@@ -1487,7 +1487,7 @@ fn a_blend_tree_state_crossfades_against_a_plain_clip_state() {
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.1);
     m.tick(&plan, &mut params, 0.05); // elapsed 0.25 of 0.5 → weight 0.5
-    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
     assert!(
         (pose[0].translation.x - 3.0).abs() < 1e-4,
         "halfway: 0.5·Idle(0) + 0.5·tree(6) = 3, got {}",
@@ -1497,7 +1497,7 @@ fn a_blend_tree_state_crossfades_against_a_plain_clip_state() {
 
     // Fade done → the tree alone.
     m.tick(&plan, &mut params, 0.3);
-    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
     assert!((pose[0].translation.x - 6.0).abs() < 1e-4);
 }
 
@@ -1566,7 +1566,7 @@ fn nested_blends_evaluate_recursively() {
     ] {
         params.set_float("speed", speed);
         params.set_float("lean", lean);
-        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch);
+        evaluate_pose(&m, &plan, &params, &clip_for, &mut pose, &mut scratch, 0);
         assert!(
             (pose[0].translation.x - expected).abs() < 1e-4,
             "speed {speed} lean {lean}: pose {} expected {expected}",
@@ -1737,6 +1737,9 @@ impl AnimAssetLoader for MapAssets {
     }
 
     fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
+        if let Some(name) = content_rel.strip_prefix("anims/ik/") {
+            return ik_clip_set(name);
+        }
         if content_rel == "anims/attack.anim" {
             // A short play-once clip with one marker — the throttling tests
             // (Task 41.5 P4) fire it while the entity sits in a slow bucket.
@@ -2091,8 +2094,8 @@ fn tick_frame<'a, F>(
     m.tick(plan, params, dt);
     slot.tick(plan, params, dt, clip_for);
     collect_anim_events(m, slot, plan, params, clip_for, events);
-    evaluate_pose(m, plan, params, clip_for, pose, scratch);
-    slot.apply(plan, clip_for, pose, scratch);
+    evaluate_pose(m, plan, params, clip_for, pose, scratch, 0);
+    slot.apply(plan, clip_for, pose, scratch, 0);
 }
 
 fn count(events: &[AnimEventFire], name: &str) -> usize {
@@ -2809,7 +2812,7 @@ fn a_nested_machine_is_the_states_pose_source() {
     let mut scratch = PoseScratch::new();
     let mut sample = |m: &AnimMachine, params: &AnimParams| {
         pose[0] = LocalBoneTransform::default();
-        evaluate_pose(m, &compiled, params, &clip_for, &mut pose, &mut scratch);
+        evaluate_pose(m, &compiled, params, &clip_for, &mut pose, &mut scratch, 0);
         pose[0].translation.x
     };
 
@@ -2853,7 +2856,7 @@ fn reentering_a_nested_state_restarts_it_at_the_childs_entry() {
     let mut scratch = PoseScratch::new();
     let mut sample = |m: &AnimMachine, params: &AnimParams| {
         pose[0] = LocalBoneTransform::default();
-        evaluate_pose(m, &compiled, params, &clip_for, &mut pose, &mut scratch);
+        evaluate_pose(m, &compiled, params, &clip_for, &mut pose, &mut scratch, 0);
         pose[0].translation.x
     };
 
@@ -2912,7 +2915,7 @@ fn a_nested_transition_consumes_triggers_from_the_shared_blackboard() {
     let mut pose = vec![LocalBoneTransform::default(); 2];
     let mut scratch = PoseScratch::new();
     m.tick(&compiled, &mut params, 1.0); // the child's 0.5s fade finishes
-    evaluate_pose(&m, &compiled, &params, &clip_for, &mut pose, &mut scratch);
+    evaluate_pose(&m, &compiled, &params, &clip_for, &mut pose, &mut scratch, 0);
     assert_eq!(pose[0].translation.x, 10.0, "the child is in Walk");
 }
 
@@ -3062,7 +3065,7 @@ where
 {
     let mut pose = vec![LocalBoneTransform::default(); 2];
     let mut scratch = PoseScratch::new();
-    evaluate_pose(m, plan, params, clip_for, &mut pose, &mut scratch);
+    evaluate_pose(m, plan, params, clip_for, &mut pose, &mut scratch, 0);
     assert_eq!(pose[1].translation, Vec3::ZERO, "unanimated bones stay put");
     pose[0].translation.x
 }
@@ -5053,4 +5056,634 @@ fn unreachable_pipeline_nodes_warn_and_are_ignored() {
     assert_eq!(p.pipeline.ik_order, vec![0], "but never applied");
     assert_eq!(p.root_clips.len(), 1, "an unwired clip is not a source");
     assert!(!p.clip_refs().contains(&"anims/loose.anim"));
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline runtime (Task 41.7 P2: evaluation, events, foot locks, parity)
+// ---------------------------------------------------------------------------
+
+use crate::engine::animation::foot_placement::place_feet;
+use crate::engine::scripting::normalize_graph_path;
+use crate::engine::utils::coords::convert_position_zup_to_yup;
+
+/// Clips on the [`ik_bones`] skeleton (upper, lower, hand, tool), served by
+/// `MapAssets` under `anims/ik/<name>`: translation `x` on `lower`, `x / 2`
+/// on `hand`, nothing on the others.
+fn ik_clip_set(name: &str) -> Option<ClipSet> {
+    let (clip, x, duration, marks): (&str, f32, f32, &[(f32, &str)]) = match name {
+        "idle.anim" => ("Idle", 0.0, 1.0, &[]),
+        "walk.anim" => ("Walk", 10.0, 1.0, &[]),
+        "stride.anim" => ("Stride", 5.0, 1.0, &[(0.15, "foot_down"), (0.65, "foot_up")]),
+        "attack.anim" => ("Attack", 30.0, 0.5, &[(0.25, "hit")]),
+        "upper.anim" => ("Upper", 40.0, 1.0, &[(0.05, "wave")]),
+        _ => return None,
+    };
+    let channel = |bone_index: usize, x: f32| AnimationChannel {
+        bone_index,
+        position_keys: vec![(0.0, Vec3::new(x, 0.0, 0.0))],
+        rotation_keys: vec![],
+        scale_keys: vec![],
+    };
+    let mut clip = marked_clip(clip, 0.0, duration, marks);
+    clip.channels = vec![channel(1, x), channel(2, x * 0.5)];
+    Some(ClipSet {
+        bone_names: ik_bones().iter().map(|b| b.name.clone()).collect(),
+        clips: vec![clip],
+    })
+}
+
+fn same_pose(a: &[LocalBoneTransform], b: &[LocalBoneTransform]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.translation == y.translation && x.rotation == y.rotation && x.scale == y.scale
+        })
+}
+
+fn local_x(h: &Harness, e: hecs::Entity, i: usize) -> f32 {
+    h.world.get::<&SkeletonInstance>(e).unwrap().local_transforms[i].translation.x
+}
+
+fn set_float(h: &mut Harness, e: hecs::Entity, slug: &str, v: f32) {
+    assert!(h.world.get::<&mut AnimGraphRuntime>(e).unwrap().params.set_float(slug, v));
+}
+
+fn fire_trigger(h: &mut Harness, e: hecs::Entity, slug: &str) {
+    assert!(h.world.get::<&mut AnimGraphRuntime>(e).unwrap().params.fire_trigger(slug));
+}
+
+fn events_of(h: &Harness, e: hecs::Entity) -> Vec<AnimEventFire> {
+    h.world.get::<&AnimGraphRuntime>(e).unwrap().events.clone()
+}
+
+/// The serial foot pass against flat ground at world `z` with a chosen `dt`
+/// (a small one keeps a release blend observable).
+fn place_flat(h: &mut Harness, e: hecs::Entity, z: f32, dt: f32) {
+    let mut q = h
+        .world
+        .query_one::<(&mut AnimGraphRuntime, &mut IkTargets)>(e)
+        .expect("entity");
+    let (rt, targets) = q.get().expect("components");
+    place_feet(rt, targets, Mat4::IDENTITY, dt, true, &mut |o: Vec3| {
+        Some((Vec3::new(o.x, o.y, z), Vec3::Z))
+    });
+}
+
+/// `(locked, releasing, force_eval_external)` of the first chain's foot.
+fn foot_of(h: &Harness, e: hecs::Entity) -> (bool, bool, bool) {
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let f = rt.ik[0].foot.as_ref().expect("foot chain");
+    (f.locked, f.release.is_some(), rt.throttle.force_eval_external)
+}
+
+/// One legacy frame beside the system's: the pre-41.7 evaluation (inline
+/// machine, then the whole-body overlay) and event collection, asserted
+/// equal to what the pipeline walk just wrote. `pose` persists across ticks
+/// exactly like the skeleton's locals do.
+fn assert_legacy_frame(
+    rt: &AnimGraphRuntime,
+    skel: &SkeletonInstance,
+    pose: &mut [LocalBoneTransform],
+    scratch: &mut PoseScratch,
+    events: &mut Vec<AnimEventFire>,
+    t: usize,
+) {
+    let armed = rt.clips.clone();
+    let clip_for = |c: &plan::PlanClip| {
+        armed
+            .get(&normalize_graph_path(&c.clip))?
+            .select(c.clip_name.as_deref())
+    };
+    evaluate_pose(&rt.machine, &rt.plan, &rt.params, &clip_for, pose, scratch, 0);
+    rt.slot.apply(&rt.plan, &clip_for, pose, scratch, 0);
+    assert!(
+        same_pose(pose, &skel.local_transforms),
+        "tick {t}: the pipeline walk differs from the legacy evaluation"
+    );
+    collect_anim_events(&rt.machine, &rt.slot, &rt.plan, &rt.params, &clip_for, events);
+    assert_eq!(*events, rt.events, "tick {t}: events differ from the legacy collection");
+}
+
+// -- Golden parity: the demo graph on the real rig ---------------------------
+
+fn demo_content() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("content")
+}
+
+/// The disk loader with every document upgraded to a pipeline root on load
+/// — the "after migration" side of the golden test.
+struct UpgradedDisk(super::DiskAnimAssets);
+
+impl AnimAssetLoader for UpgradedDisk {
+    fn load_graph(&self, content_rel: &str) -> Option<GraphDoc> {
+        let mut doc = self.0.load_graph(content_rel)?;
+        upgrade_pipeline_root(&mut doc);
+        Some(doc)
+    }
+    fn load_clips(&self, content_rel: &str) -> Option<ClipSet> {
+        self.0.load_clips(content_rel)
+    }
+    fn load_skeleton(&self, mesh_content_rel: &str) -> Option<Vec<BoneData>> {
+        self.0.load_skeleton(mesh_content_rel)
+    }
+    fn load_blend_space(&self, content_rel: &str) -> Option<String> {
+        self.0.load_blend_space(content_rel)
+    }
+}
+
+/// Speed ramps up, holds, a jump, a stop, then death.
+fn demo_script(t: usize, p: &mut AnimParams) {
+    let speed = if t < 40 {
+        t as f32 * 0.15
+    } else if t < 80 {
+        6.0
+    } else {
+        0.0
+    };
+    assert!(p.set_float("speed", speed));
+    if t == 50 {
+        assert!(p.set_bool("grounded", false));
+    }
+    if t == 58 {
+        assert!(p.set_bool("grounded", true));
+    }
+    if t == 100 {
+        assert!(p.fire_trigger("died"));
+    }
+}
+
+/// 120 ticks of the locomotion demo on the Defeated rig; per-tick palettes.
+/// `legacy` also runs the pre-41.7 evaluator beside the system every tick.
+fn run_demo(assets: Box<dyn AnimAssetLoader + Send + Sync>, legacy: bool) -> Vec<Vec<Mat4>> {
+    let bind = SkeletonInstance::from_bones(assets.load_skeleton("Defeated.mesh").expect("mesh"))
+        .local_transforms;
+    let mut resources = Resources::new();
+    let mut time = Time::new();
+    time.delta = 1.0 / 60.0;
+    resources.insert(time);
+    resources.insert(AnimGraphPlanCache::new());
+    resources.insert(AnimClipCache::new());
+    resources.insert(BlendSpaceCache::new());
+    let mut system = AnimGraphSystem::new(assets);
+    let mut world = hecs::World::new();
+    let rig = world.spawn((
+        Transform::default(),
+        MeshRenderer {
+            mesh_path: "Defeated.mesh".to_string(),
+            ..Default::default()
+        },
+        AnimGraphRunner::new("graphs/locomotion_demo.animgraph"),
+    ));
+    let mut pose = bind;
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    let mut palettes = Vec::new();
+    for t in 0..120 {
+        if t > 0 {
+            let mut rt = world.get::<&mut AnimGraphRuntime>(rig).expect("armed");
+            assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+            demo_script(t, &mut rt.params);
+        }
+        system.run(&mut world, &mut resources);
+        let rt = world.get::<&AnimGraphRuntime>(rig).expect("armed");
+        let skel = world.get::<&SkeletonInstance>(rig).expect("skeleton");
+        if legacy {
+            assert_legacy_frame(&rt, &skel, &mut pose, &mut scratch, &mut events, t);
+        }
+        palettes.push(skel.palette.clone());
+    }
+    palettes
+}
+
+/// Golden parity on the shipped demo: the v3 document as-is and the same
+/// document after `upgrade_pipeline_root` drive the real rig through 120
+/// scripted ticks to bit-identical palettes — and the pipeline walk matches
+/// the pre-41.7 evaluator (and event collection) on every tick.
+#[test]
+fn the_migrated_demo_graph_animates_identically() {
+    let content = demo_content();
+    let before = run_demo(
+        Box::new(super::DiskAnimAssets {
+            content_root: content.clone(),
+        }),
+        true,
+    );
+    let after = run_demo(
+        Box::new(UpgradedDisk(super::DiskAnimAssets {
+            content_root: content,
+        })),
+        false,
+    );
+    assert_eq!(before.len(), 120);
+    for (t, (a, b)) in before.iter().zip(&after).enumerate() {
+        assert_eq!(a, b, "tick {t}: palette differs after the upgrade");
+    }
+    let moved = before
+        .last()
+        .unwrap()
+        .iter()
+        .filter(|m| (**m - Mat4::IDENTITY).abs().to_cols_array().iter().any(|v| *v > 1e-4))
+        .count();
+    assert!(moved > 10, "the rig animated ({moved} non-identity palette entries)");
+}
+
+// -- Golden parity: slots + a nested machine with a chain and a slot --------
+
+/// `two_state_doc` on the ik clips (Idle plays `ik/stride`, Walk `ik/walk`).
+fn ik_two_state_doc() -> GraphDoc {
+    let mut doc = two_state_doc();
+    for (id, path) in [(2, "anims/ik/stride.anim"), (3, "anims/ik/walk.anim")] {
+        doc.node_mut(id)
+            .unwrap()
+            .properties
+            .insert(plan::CLIP_PROP.into(), PropValue::Asset(path.into()));
+    }
+    doc
+}
+
+/// The nested child: its own Idle/Walk machine, a chain `child_ik` (id 5,
+/// lower than the host's) and a slot `ChildAttack`.
+fn parity_child_doc() -> GraphDoc {
+    let mut doc = ik_two_state_doc();
+    doc.variables.push(float_decl("ik"));
+    doc.variables.push(trigger_decl("attack"));
+    doc.nodes
+        .push(ik_node(5, "child_ik", "upper, lower, hand", "ik"));
+    doc.nodes
+        .push(slot_node(9, "ChildAttack", "anims/ik/attack.anim", "attack"));
+    doc
+}
+
+/// The v3 parity host: `nested_host_doc` (Base plays `ik/walk`, Loco nests
+/// [`CHILD`] with a 0.5 s fade) plus two loose slots (ids 31 then 30 —
+/// legacy channel order is by id) and a host chain `host_ik` (id 6).
+fn parity_host_doc() -> GraphDoc {
+    let mut host = nested_host_doc(0.5);
+    host.node_mut(2).unwrap().properties.insert(
+        plan::CLIP_PROP.into(),
+        PropValue::Asset("anims/ik/walk.anim".into()),
+    );
+    host.variables
+        .extend([float_decl("ik"), trigger_decl("cast"), trigger_decl("wave")]);
+    host.nodes.extend([
+        slot_node(31, "Wave", "anims/ik/upper.anim", "wave"),
+        slot_node(30, "Cast", "anims/ik/attack.anim", "cast"),
+        ik_node(6, "host_ik", "upper, lower, hand", "ik"),
+    ]);
+    host
+}
+
+/// World Z-up goals under an identity entity: model Y-up `(3, 9, 0)` and
+/// `(6, 6, 0)` (zup `(x, y, z)` → yup `(y, z, −x)`), both inside the walk
+/// clip's reach (bone lengths 10 and 5), with poles off the hip–target line.
+const HOST_TARGET: Vec3 = Vec3::new(0.0, 3.0, 9.0);
+const HOST_POLE: Vec3 = Vec3::new(0.0, 3.0, 0.0);
+const CHILD_TARGET: Vec3 = Vec3::new(0.0, 6.0, 6.0);
+const CHILD_POLE: Vec3 = Vec3::new(0.0, 6.0, 0.0);
+
+/// Enter the nested state, walk inside it, fire every slot (host and
+/// lifted, one replacing another), leave, re-enter.
+fn parity_script(t: usize, p: &mut AnimParams) {
+    match t {
+        5 => assert!(p.set_bool("go", true)),
+        10 => assert!(p.set_float("ik", 1.0)),
+        20 => assert!(p.set_bool("walk", true)),
+        30 => assert!(p.fire_trigger("cast")),
+        37 => assert!(p.fire_trigger("wave")),
+        50 => assert!(p.fire_trigger("attack")),
+        70 => assert!(p.set_bool("stop", true)),
+        71 => {
+            assert!(p.set_bool("stop", false));
+            assert!(p.set_bool("go", false));
+        }
+        90 => assert!(p.set_bool("go", true)),
+        _ => {}
+    }
+}
+
+struct ParityRun {
+    frames: Vec<(Vec<LocalBoneTransform>, Vec<Mat4>)>,
+    slot_ticks: usize,
+    hits: usize,
+    hand: Vec3,
+}
+
+/// 120 ticks of `GRAPH` on the ik skeleton with both chains targeted.
+fn run_parity(graphs: &[(&str, GraphDoc)], legacy: bool) -> ParityRun {
+    let assets = MapAssets::default();
+    for (k, d) in graphs {
+        assets.graphs.lock().unwrap().insert(k.to_string(), d.clone());
+    }
+    let mut h = Harness::new(assets);
+    let mut targets = IkTargets::default();
+    targets.set("host_ik", HOST_TARGET, HOST_POLE);
+    targets.set("child_ik", CHILD_TARGET, CHILD_POLE);
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        targets,
+    ));
+    let mut pose = SkeletonInstance::from_bones(ik_bones()).local_transforms;
+    let mut scratch = PoseScratch::new();
+    let mut events = Vec::new();
+    let mut run = ParityRun {
+        frames: Vec::new(),
+        slot_ticks: 0,
+        hits: 0,
+        hand: Vec3::ZERO,
+    };
+    for t in 0..120 {
+        if t > 0 {
+            let mut rt = h.world.get::<&mut AnimGraphRuntime>(e).expect("armed");
+            assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+            parity_script(t, &mut rt.params);
+        }
+        h.tick();
+        let rt = h.world.get::<&AnimGraphRuntime>(e).expect("armed");
+        let skel = h.world.get::<&SkeletonInstance>(e).expect("skeleton");
+        if legacy {
+            assert_legacy_frame(&rt, &skel, &mut pose, &mut scratch, &mut events, t);
+        }
+        run.slot_ticks += usize::from(rt.slot.playing().is_some());
+        run.hits += count(&rt.events, "hit");
+        run.frames
+            .push((skel.local_transforms.clone(), skel.palette.clone()));
+    }
+    run.hand = bone_pos(&h, e, 2);
+    run
+}
+
+/// Golden parity on the synthetic fixture: two host slots, a nested machine
+/// carrying its own chain and slot (lifted), both chains solving. The v3
+/// document and its upgraded self evaluate to bit-identical locals and
+/// palettes for 120 scripted ticks; the pipeline walk matches the legacy
+/// evaluator on the local-space stage. The IK stage pins U2: the host chain
+/// applies first and the lifted child chain last, so the hand ends on the
+/// child's target.
+#[test]
+fn a_migrated_slot_and_nested_fixture_evaluates_identically() {
+    let v3 = parity_host_doc();
+    let mut v4 = v3.clone();
+    assert!(upgrade_pipeline_root(&mut v4));
+    let before = run_parity(&[(GRAPH, v3), (CHILD, parity_child_doc())], true);
+    let after = run_parity(&[(GRAPH, v4), (CHILD, parity_child_doc())], false);
+    for (t, (a, b)) in before.frames.iter().zip(&after.frames).enumerate() {
+        assert!(same_pose(&a.0, &b.0), "tick {t}: locals differ after the upgrade");
+        assert_eq!(a.1, b.1, "tick {t}: palette differs after the upgrade");
+    }
+    assert!(before.slot_ticks >= 15, "slots played ({} ticks)", before.slot_ticks);
+    assert_eq!(before.hits, 2, "the host cast and the lifted child attack each hit once");
+    let expected = convert_position_zup_to_yup(CHILD_TARGET);
+    assert!(
+        (before.hand - expected).length() < 1e-2,
+        "host chain first, lifted child chain last: hand {} vs {expected}",
+        before.hand
+    );
+}
+
+// -- Masked / whole-body overlays and foot locks ------------------------------
+
+/// A v4 document on the ik skeleton: ENTRY → Stride (`ik/stride`,
+/// `foot_down` @ 0.15 s, `foot_up` @ 0.65 s); `SM(20) → Cast(23) →
+/// foot(24) → Output(25)`. The Cast slot plays `ik/attack` on Trigger
+/// `cast`, masked to `bones` when given (whole body otherwise); the foot
+/// chain is upper/lower/hand with the pelvis on `upper`.
+fn foot_cast_doc(bones: Option<&str>) -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("ik"), trigger_decl("cast")];
+    let mut cast = slot_node(23, "Cast", "anims/ik/attack.anim", "cast");
+    if let Some(b) = bones {
+        cast.properties
+            .insert(MASK_BONES_PROP.into(), PropValue::Str(b.into()));
+    }
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(
+            2,
+            plan::ANIM_STATE_TYPE_ID,
+            Some("Stride"),
+            &[(plan::CLIP_PROP, PropValue::Asset("anims/ik/stride.anim".into()))],
+        ),
+        node(20, ANIM_PIPE_MACHINE_TYPE_ID, None),
+        cast,
+        with(24, plan::ANIM_IK_CHAIN_TYPE_ID, Some("foot"), &foot_props()),
+        node(25, ANIM_PIPE_OUTPUT_TYPE_ID, None),
+    ];
+    doc.edges = vec![
+        edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN),
+        pose_edge(20, 23, PIPE_IN_PIN),
+        pose_edge(23, 24, PIPE_IN_PIN),
+        pose_edge(24, 25, PIPE_IN_PIN),
+    ];
+    doc
+}
+
+/// Arm [`foot_cast_doc`], tick twice (the second tick crosses `foot_down`)
+/// and plant the foot on flat ground 0.1 below the entity: a locked foot.
+fn locked_foot(bones: Option<&str>) -> (Harness, hecs::Entity) {
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), foot_cast_doc(bones));
+    let mut h = Harness::new(assets);
+    let e = h.world.spawn((
+        Transform::new(nalgebra_glm::vec3(0.0, 0.0, 0.0)),
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+        IkTargets::default(),
+    ));
+    h.tick(); // arm; state clock [0, 0.1)
+    assert!(h.world.get::<&AnimGraphRuntime>(e).unwrap().disabled.is_none());
+    set_float(&mut h, e, "ik", 1.0);
+    h.tick(); // [0.1, 0.2): foot_down
+    assert_eq!(count(&events_of(&h, e), "foot_down"), 1);
+    place_flat(&mut h, e, -0.1, 0.05);
+    assert_eq!(foot_of(&h, e), (true, false, true), "planted");
+    h.world
+        .get::<&mut AnimGraphRuntime>(e)
+        .unwrap()
+        .throttle
+        .force_eval_external = false;
+    (h, e)
+}
+
+/// U1 / rule (b), masked side: a Play Once masked to the hand plays over
+/// the walk without silencing its events — `foot_up` still fires at full
+/// weight under a full-weight cast — and never touches the lock, which
+/// survives the cast and releases on `_up` as always. Only masked bones
+/// follow the overlay.
+#[test]
+fn a_masked_play_once_keeps_base_events_and_the_foot_lock() {
+    let (mut h, e) = locked_foot(Some("hand"));
+    fire_trigger(&mut h, e, "cast");
+    h.tick(); // tick 3: the cast starts (whole channel, masked to hand+tool)
+    assert_eq!(h.world.get::<&AnimGraphRuntime>(e).unwrap().slot.playing(), Some(0));
+    place_flat(&mut h, e, -0.1, 0.05);
+    assert_eq!(foot_of(&h, e), (true, false, false), "a masked start leaves the lock alone");
+
+    h.tick(); // tick 4: overlay at full weight
+    assert_eq!(local_x(&h, e, 2), 15.0, "hand follows the cast (30 / 2)");
+    assert_eq!(local_x(&h, e, 1), 5.0, "lower keeps the stride");
+    h.tick(); // tick 5
+    h.tick(); // tick 6: the cast's hit marker (0.25) crosses
+    assert_eq!(count(&events_of(&h, e), "hit"), 1);
+    h.tick(); // tick 7: state clock [0.6, 0.7) — foot_up, cast still at weight 1
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "foot_up"), 1, "masked: nothing suppressed: {ev:?}");
+    assert_eq!(ev.iter().find(|f| f.name == "foot_up").unwrap().weight, 1.0);
+    place_flat(&mut h, e, -0.1, 0.05);
+    assert_eq!(foot_of(&h, e), (false, true, true), "released on _up with a blend");
+}
+
+/// U1 / rule (b), whole-body side: a whole-body Play Once starting releases
+/// every locked foot with the normal release blend and a forced evaluation
+/// — because from then on its `1 − weight` suppression hides the base's
+/// `_up` (asserted), which would otherwise strand the lock.
+#[test]
+fn a_whole_body_play_once_start_releases_the_foot_lock() {
+    let (mut h, e) = locked_foot(None);
+    fire_trigger(&mut h, e, "cast");
+    h.tick(); // tick 3: the cast starts
+    place_flat(&mut h, e, -0.1, 0.05);
+    assert_eq!(foot_of(&h, e), (false, true, true), "released on start");
+
+    h.tick(); // tick 4
+    assert_eq!(local_x(&h, e, 1), 30.0, "whole body: lower follows the cast too");
+    assert_eq!(local_x(&h, e, 2), 15.0);
+    h.tick();
+    h.tick();
+    h.tick(); // tick 7: foot_up crosses under a full-weight overlay
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "foot_up"), 0, "suppressed by 1 − weight: {ev:?}");
+    place_flat(&mut h, e, -0.1, 0.05);
+    assert!(!foot_of(&h, e).0, "still unlocked — nothing re-planted");
+}
+
+// -- Layer basics ------------------------------------------------------------
+
+/// ENTRY → Idle (`ik/idle`); `SM(20) ─base▶ Layer(22: bones, weight aim)
+/// ◀layer─ Clip(21: ik/upper) → Output(25)`.
+fn layer_doc(bones: &str) -> GraphDoc {
+    let mut doc = GraphDoc {
+        realm: GraphRealm::Client,
+        ..GraphDoc::default()
+    };
+    doc.variables = vec![float_decl("aim")];
+    doc.nodes = vec![
+        node(1, plan::ANIM_ENTRY_TYPE_ID, None),
+        with(
+            2,
+            plan::ANIM_STATE_TYPE_ID,
+            Some("Idle"),
+            &[(plan::CLIP_PROP, PropValue::Asset("anims/ik/idle.anim".into()))],
+        ),
+        node(20, ANIM_PIPE_MACHINE_TYPE_ID, None),
+        clip_source(21, Some("Upper"), "anims/ik/upper.anim"),
+        layer_node(22, Some("Aim"), bones, "aim"),
+        node(25, ANIM_PIPE_OUTPUT_TYPE_ID, None),
+    ];
+    doc.edges = vec![
+        edge(1, plan::STATE_OUT_PIN, 2, plan::STATE_IN_PIN),
+        pose_edge(20, 22, LAYER_BASE_PIN),
+        pose_edge(21, 22, LAYER_LAYER_PIN),
+        pose_edge(22, 25, PIPE_IN_PIN),
+    ];
+    doc
+}
+
+fn layer_harness(bones: &str) -> (Harness, hecs::Entity) {
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), layer_doc(bones));
+    let mut h = Harness::new(assets);
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    (h, e)
+}
+
+/// A Layer masked to `lower` (and so its descendants) at weight 1 puts the
+/// layer clip on the masked bones only; weight 0 (or a non-finite weight)
+/// is the base; 0.5 blends half-way. The root clip's marker fires at the
+/// layer's weight and not at all when the layer is silent.
+#[test]
+fn a_layer_at_weight_one_changes_masked_bones_only() {
+    let (mut h, e) = layer_harness("lower");
+    assert!(h.world.get::<&AnimGraphRuntime>(e).unwrap().disabled.is_none());
+    assert_eq!(
+        h.world.get::<&AnimGraphRuntime>(e).unwrap().masks.get(&22),
+        Some(&vec![0.0, 1.0, 1.0, 1.0]),
+        "lower, hand and tool are under the mask root"
+    );
+    // Tick 1 crossed `wave` (0.05) on the root clock, at weight 0: silent.
+    assert_eq!(count(&events_of(&h, e), "wave"), 0);
+    assert_eq!((local_x(&h, e, 1), local_x(&h, e, 2)), (0.0, 0.0), "aim 0: base");
+
+    set_float(&mut h, e, "aim", 1.0);
+    h.tick();
+    assert_eq!(local_x(&h, e, 0), 0.0, "upper is outside the mask");
+    assert_eq!(local_x(&h, e, 1), 40.0, "lower follows the layer");
+    assert_eq!(local_x(&h, e, 2), 20.0, "hand follows the layer");
+
+    set_float(&mut h, e, "aim", 0.5);
+    h.tick();
+    assert_eq!((local_x(&h, e, 1), local_x(&h, e, 2)), (20.0, 10.0), "half-way");
+    for _ in 3..11 {
+        h.tick();
+    }
+    // Tick 11: the root clock runs [1.0, 1.1) — the marker's second cycle.
+    let ev = events_of(&h, e);
+    assert_eq!(count(&ev, "wave"), 1, "{ev:?}");
+    assert_eq!(ev[0].weight, 0.5, "scaled by the layer's weight");
+
+    set_float(&mut h, e, "aim", f32::NAN);
+    h.tick();
+    assert_eq!((local_x(&h, e, 1), local_x(&h, e, 2)), (0.0, 0.0), "non-finite: base");
+}
+
+/// A mask root the skeleton lacks refuses at arm, anchored on the node —
+/// the same shape as an IK chain's missing bone.
+#[test]
+fn arming_refuses_a_missing_mask_root() {
+    let (h, e) = layer_harness("shin");
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(
+        why.contains("layer #22: bone 'shin' is not in the skeleton"),
+        "{why}"
+    );
+}
+
+/// A root clip whose asset is missing refuses at arm like a state's clip.
+#[test]
+fn arming_refuses_a_missing_root_clip() {
+    let mut doc = layer_doc("lower");
+    doc.node_mut(21).unwrap().properties.insert(
+        plan::CLIP_PROP.into(),
+        PropValue::Asset("anims/ik/nope.anim".into()),
+    );
+    let assets = MapAssets::default();
+    assets.graphs.lock().unwrap().insert(GRAPH.into(), doc);
+    let mut h = Harness::new(assets);
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(ik_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(why.contains("clip #21: clip 'anims/ik/nope.anim' could not be loaded"), "{why}");
 }

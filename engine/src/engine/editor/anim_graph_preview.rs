@@ -402,6 +402,7 @@ impl AnimGraphPreview {
                 clip_for,
                 &mut skel.local_transforms,
                 &mut self.scratch,
+                0,
             ),
             None => {
                 self.machine.tick(
@@ -416,6 +417,7 @@ impl AnimGraphPreview {
                     clip_for,
                     &mut skel.local_transforms,
                     &mut self.scratch,
+                    0,
                 );
             }
         }

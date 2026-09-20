@@ -14,8 +14,8 @@ use crate::engine::animation::sampling;
 use crate::engine::assets::model_loader::RawAnimationClip;
 
 use super::plan::{
-    AnimGraphPlan, CmpOp, MathOp, ParamDecl, PlanClip, PlanSlot, PlanSpace, PlanTree,
-    PoseSource, RuleExpr, TransitionFrom,
+    AnimGraphPlan, CmpOp, MachineSource, MathOp, ParamDecl, PlanClip, PlanPose, PlanSlot,
+    PlanSpace, PlanTree, PoseSource, RuleExpr, TransitionFrom,
 };
 
 // ---------------------------------------------------------------------------
@@ -901,7 +901,9 @@ fn eval_machine<'a, F>(
 ///
 /// `clip_for` resolves a plan clip reference to its loaded clip. `params`
 /// drives blend weights (crossfades already advanced in `tick`). `scratch`
-/// is caller-owned so the per-frame path allocates nothing at steady state.
+/// is caller-owned so the per-frame path allocates nothing at steady state;
+/// `level` is the first *free* scratch index (0 when nothing above this
+/// call holds a buffer — the pipeline evaluator passes its own depth).
 pub fn evaluate_pose<'a, F>(
     machine: &AnimMachine,
     plan: &AnimGraphPlan,
@@ -909,10 +911,11 @@ pub fn evaluate_pose<'a, F>(
     clip_for: F,
     pose: &mut [LocalBoneTransform],
     scratch: &mut PoseScratch,
+    level: usize,
 ) where
     F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
 {
-    eval_machine(machine, plan, params, &clip_for, pose, scratch, 0);
+    eval_machine(machine, plan, params, &clip_for, pose, scratch, level);
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +931,10 @@ pub fn evaluate_pose<'a, F>(
 #[derive(Debug, Clone, Default)]
 pub struct PlayOnceSlot {
     playing: Option<SlotPlayback>,
+    /// The slot that took the channel on the last tick (`None` = nothing
+    /// started). Read by foot placement (Task 41.7, interruption rule (b)):
+    /// a whole-body overlay starting releases every foot lock.
+    started: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -951,7 +958,9 @@ impl PlayOnceSlot {
     /// machine's tick (its transitions consume their triggers first).
     ///
     /// Starting is trigger-driven so gameplay stays inside the parameter
-    /// contract: the first slot in plan order whose Trigger is set takes the
+    /// contract: the first slot in the pipeline's wire order
+    /// ([`super::plan::PlanPipeline::slot_order`]; plan index order for a
+    /// hand-built plan with no pipeline) whose Trigger is set takes the
     /// channel and consumes the trigger (consume-on-start); other set
     /// triggers stay buffered and take the channel — replacing — on a later
     /// tick. A running slot retires one tick after its clock passes the clip
@@ -966,6 +975,7 @@ impl PlayOnceSlot {
     ) where
         F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
     {
+        self.started = None;
         if let Some(p) = &mut self.playing {
             let speed = plan.slots.get(p.slot).map_or(1.0, |s| s.speed);
             if p.prev >= p.len {
@@ -975,7 +985,15 @@ impl PlayOnceSlot {
                 p.time += dt * speed;
             }
         }
-        for (i, slot) in plan.slots.iter().enumerate() {
+        let order = &plan.pipeline.slot_order;
+        let n = if order.is_empty() {
+            plan.slots.len()
+        } else {
+            order.len()
+        };
+        for k in 0..n {
+            let i = if order.is_empty() { k } else { order[k] };
+            let Some(slot) = plan.slots.get(i) else { continue };
             if params.trigger_set(&slot.trigger) == Some(true) {
                 // Arming refused missing clips; a race just leaves the
                 // trigger buffered for the next tick.
@@ -987,6 +1005,7 @@ impl PlayOnceSlot {
                     time: 0.0,
                     len: clip.duration_seconds,
                 });
+                self.started = Some(i);
                 break;
             }
         }
@@ -995,6 +1014,12 @@ impl PlayOnceSlot {
     /// Index into the plan's slots while something plays.
     pub fn playing(&self) -> Option<usize> {
         self.playing.as_ref().map(|p| p.slot)
+    }
+
+    /// The slot that took the channel on the last [`Self::tick`] (a fresh
+    /// start or a replacement), `None` otherwise.
+    pub fn started(&self) -> Option<usize> {
+        self.started
     }
 
     /// The overlay's blend weight right now: the fade-in/out envelope while
@@ -1007,16 +1032,36 @@ impl PlayOnceSlot {
             .map_or(0.0, |slot| envelope(slot, p.time, p.len))
     }
 
-    /// Overlay the slot's clip onto an already-evaluated base `pose` — the
-    /// spec's "play-once slot overlay" stage, after [`evaluate_pose`]. One
-    /// shot: the sample clamps at the clip end (never wraps), so the last
-    /// frame holds through a fade-out.
+    /// Overlay the slot's clip onto an already-evaluated base `pose` over the
+    /// whole body — the spec's "play-once slot overlay" stage, after
+    /// [`evaluate_pose`]. One shot: the sample clamps at the clip end (never
+    /// wraps), so the last frame holds through a fade-out. `level` is the
+    /// first free scratch index.
     pub fn apply<'a, F>(
         &self,
         plan: &AnimGraphPlan,
         clip_for: &F,
         pose: &mut [LocalBoneTransform],
         scratch: &mut PoseScratch,
+        level: usize,
+    ) where
+        F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+    {
+        self.apply_masked(plan, clip_for, pose, scratch, level, None);
+    }
+
+    /// [`Self::apply`] under a per-bone mask (Task 41.7): bone `b` blends at
+    /// `mask[b] × weight`; `None` is the whole body. A bone the mask leaves
+    /// at 0 keeps the base exactly (no blend call), so a whole-body overlay
+    /// and an all-ones mask are bit-identical.
+    pub fn apply_masked<'a, F>(
+        &self,
+        plan: &AnimGraphPlan,
+        clip_for: &F,
+        pose: &mut [LocalBoneTransform],
+        scratch: &mut PoseScratch,
+        level: usize,
+        mask: Option<&[f32]>,
     ) where
         F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
     {
@@ -1029,14 +1074,26 @@ impl PlayOnceSlot {
         let Some(clip) = clip_for(&slot.clip) else { return };
         // The overlay starts from the same pre-sample transforms as the base
         // — the agreement every blend in this module keeps.
-        let mut buf = scratch.take(0);
+        let mut buf = scratch.take(level);
         buf.clear();
         buf.extend_from_slice(pose);
         sampling::sample_channels(&clip.channels, p.time.min(p.len), &mut buf);
-        for (out, over) in pose.iter_mut().zip(buf.iter()) {
-            *out = out.blend(over, w);
+        match mask {
+            None => {
+                for (out, over) in pose.iter_mut().zip(buf.iter()) {
+                    *out = out.blend(over, w);
+                }
+            }
+            Some(mask) => {
+                for (b, (out, over)) in pose.iter_mut().zip(buf.iter()).enumerate() {
+                    let k = mask.get(b).copied().unwrap_or(0.0) * w;
+                    if k > 0.0 {
+                        *out = out.blend(over, k);
+                    }
+                }
+            }
         }
-        scratch.put(0, buf);
+        scratch.put(level, buf);
     }
 }
 
@@ -1272,11 +1329,47 @@ fn machine_events<'a, F>(
     }
 }
 
+/// The play-once slot's own clip crossings this tick, scaled by `scale` (the
+/// weight the overlay's branch is heard at): one shot, no cycles — each
+/// marker fires once as the clock reaches it (hit frames on attack
+/// overlays). The weight is the envelope at the marker's own time, so a
+/// marker on the final frame is not zeroed by the clock having already
+/// overshot the clip end.
+fn slot_events<'a, F>(
+    slot: &PlayOnceSlot,
+    plan: &AnimGraphPlan,
+    scale: f32,
+    clip_for: &F,
+    out: &mut Vec<AnimEventFire>,
+) where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    let Some(p) = &slot.playing else { return };
+    let Some(s) = plan.slots.get(p.slot) else { return };
+    let Some(clip) = clip_for(&s.clip) else { return };
+    for m in &clip.events {
+        if p.prev <= m.time_seconds && m.time_seconds < p.time {
+            let w = envelope(s, m.time_seconds, p.len) * scale;
+            if w > 0.0 {
+                out.push(AnimEventFire {
+                    name: m.name.clone(),
+                    weight: w,
+                });
+            }
+        }
+    }
+}
+
 /// Collect every anim event this frame's playback crossed — the machine's
 /// states (per the clock spans its tick recorded, nested sub-machines
 /// included) and the play-once slot — into `out`. Call after both ticks;
 /// `out` is caller-owned and cleared here, so steady state allocates nothing
 /// once grown.
+///
+/// This is the single-machine, whole-body-overlay case (a pre-41.7 document:
+/// machine → play-once → output). The runner walks the compiled pipeline
+/// instead ([`PipelineState::collect_events`]), which reduces to exactly
+/// this for such a document; tests and tools keep this seam.
 pub fn collect_anim_events<'a, F>(
     machine: &AnimMachine,
     slot: &PlayOnceSlot,
@@ -1295,25 +1388,330 @@ pub fn collect_anim_events<'a, F>(
     if base_scale > 0.0 {
         machine_events(machine, plan, params, base_scale, &clip_for, out);
     }
+    slot_events(slot, plan, 1.0, &clip_for, out);
+}
 
-    // The slot's own clip: one shot, no cycles — each marker fires once as
-    // the clock reaches it (hit frames on attack overlays). The weight is the
-    // envelope at the marker's own time, so a marker on the final frame is
-    // not zeroed by the clock having already overshot the clip end.
-    if let Some(p) = &slot.playing {
-        if let Some(s) = plan.slots.get(p.slot) {
-            if let Some(clip) = clip_for(&s.clip) {
-                for m in &clip.events {
-                    if p.prev <= m.time_seconds && m.time_seconds < p.time {
-                        let w = envelope(s, m.time_seconds, p.len);
-                        if w > 0.0 {
-                            out.push(AnimEventFire {
-                                name: m.name.clone(),
-                                weight: w,
-                            });
-                        }
+// ---------------------------------------------------------------------------
+// Pipeline evaluation (Task 41.7)
+// ---------------------------------------------------------------------------
+
+/// A root Clip node's clock: looping, advanced by `dt × speed` each tick.
+/// `prev..time` is the span the last tick advanced — what event crossing
+/// detection replays (the same half-open rule as a state's span).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RootClipClock {
+    pub prev: f32,
+    pub time: f32,
+}
+
+/// Fresh machine instances for the plan's pipeline-nested State Machine
+/// nodes: index-aligned with `plan.machines` **minus the inline entry**
+/// (`extra_machines[k]` is `plan.machines[k]` for `k < inline_machine`,
+/// `plan.machines[k + 1]` after it — see [`extra_machine_index`]). Each sits
+/// in its own plan's entry state.
+pub fn new_extra_machines(plan: &AnimGraphPlan) -> Vec<AnimMachine> {
+    plan.machines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != plan.inline_machine)
+        .map(|(_, m)| match &m.source {
+            MachineSource::Nested { plan, .. } => AnimMachine::new(plan),
+            // Unreachable for a compiled plan (one inline machine); a
+            // harmless empty machine keeps the index alignment.
+            MachineSource::Inline => AnimMachine::new(&AnimGraphPlan::default()),
+        })
+        .collect()
+}
+
+/// `plan.machines[i]` → its slot in `extra_machines` (`None` for the inline
+/// machine, which lives on `AnimGraphRuntime::machine`).
+pub fn extra_machine_index(plan: &AnimGraphPlan, i: usize) -> Option<usize> {
+    match i.cmp(&plan.inline_machine) {
+        std::cmp::Ordering::Less => Some(i),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(i - 1),
+    }
+}
+
+/// The nested plan behind `extra_machines[k]`.
+fn extra_machine_plan(plan: &AnimGraphPlan, k: usize) -> Option<&AnimGraphPlan> {
+    let i = if k < plan.inline_machine { k } else { k + 1 };
+    match &plan.machines.get(i)?.source {
+        MachineSource::Nested { plan, .. } => Some(plan),
+        MachineSource::Inline => None,
+    }
+}
+
+/// Tick every extra machine on the shared blackboard, in `plan.machines`
+/// order — after the inline machine consumed its triggers, before the slot
+/// (the published consumption order).
+pub fn tick_extra_machines(
+    plan: &AnimGraphPlan,
+    extra: &mut [AnimMachine],
+    params: &mut AnimParams,
+    dt: f32,
+) {
+    for (k, m) in extra.iter_mut().enumerate() {
+        if let Some(child) = extra_machine_plan(plan, k) {
+            m.tick(child, params, dt);
+        }
+    }
+}
+
+/// Advance the root clip clocks by `dt × speed` (U3: root clips always loop
+/// — the sampler wraps by clip duration, so the clock only grows).
+pub fn tick_root_clocks(plan: &AnimGraphPlan, clocks: &mut [RootClipClock], dt: f32) {
+    for (c, rc) in clocks.iter_mut().zip(&plan.root_clips) {
+        c.prev = c.time;
+        c.time += dt * rc.speed;
+    }
+}
+
+/// True while any machine of the pipeline — inline or extra — is mid-fade or
+/// fired this tick (the S-D4 forced-evaluation condition, aggregated).
+pub fn any_transition_activity(inline: &AnimMachine, extra: &[AnimMachine]) -> bool {
+    inline.transition_activity() || extra.iter().any(AnimMachine::transition_activity)
+}
+
+/// Is `slot` applied over the whole body by its Play Once node (no `bones`
+/// mask)? A slot the pipeline never mentions counts as whole-body too — a
+/// hand-built plan has no overlay nodes and behaves like a pre-41.7 one.
+pub fn whole_body_slot(plan: &AnimGraphPlan, slot: usize) -> bool {
+    fn find(pose: &PlanPose, slot: usize) -> Option<bool> {
+        match pose {
+            PlanPose::Machine(_) | PlanPose::Clip(_) => None,
+            PlanPose::Layer { base, layer, .. } => find(base, slot).or_else(|| find(layer, slot)),
+            PlanPose::Overlay {
+                input,
+                slot: s,
+                mask,
+                ..
+            } => {
+                if *s == slot {
+                    Some(mask.is_none())
+                } else {
+                    find(input, slot)
+                }
+            }
+        }
+    }
+    find(&plan.pipeline.root, slot).unwrap_or(true)
+}
+
+/// A Layer's weight this frame: its Float parameter clamped to `[0, 1]`,
+/// 0 when undeclared or non-finite.
+fn layer_weight(params: &AnimParams, slug: &str) -> f32 {
+    let w = params.get_float(slug).unwrap_or(0.0);
+    if w.is_finite() {
+        w.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Everything the pipeline evaluator reads for one frame — the runtime's
+/// fields borrowed, or the preview panel's own copies (one evaluator, two
+/// hosts). `masks` are the per-skeleton bone weights resolved at arm time,
+/// keyed by the Layer / Play Once node id; a node whose mask is missing
+/// passes its base/input through untouched.
+pub struct PipelineState<'a> {
+    pub plan: &'a AnimGraphPlan,
+    /// The inline machine (`plan.machines[plan.inline_machine]`).
+    pub machine: &'a AnimMachine,
+    /// See [`new_extra_machines`] for the index mapping.
+    pub extra_machines: &'a [AnimMachine],
+    /// Index-aligned with `plan.root_clips`.
+    pub root_clocks: &'a [RootClipClock],
+    pub masks: &'a BTreeMap<u64, Vec<f32>>,
+    pub slot: &'a PlayOnceSlot,
+    pub params: &'a AnimParams,
+}
+
+impl PipelineState<'_> {
+    /// The machine `plan.machines[i]` names, with its plan.
+    fn machine_at(&self, i: usize) -> Option<(&AnimMachine, &AnimGraphPlan)> {
+        match extra_machine_index(self.plan, i) {
+            None => Some((self.machine, self.plan)),
+            Some(k) => Some((
+                self.extra_machines.get(k)?,
+                extra_machine_plan(self.plan, k)?,
+            )),
+        }
+    }
+
+    /// Evaluate the local-space stage (`plan.pipeline.root`) into `pose`.
+    ///
+    /// Allocation contract: `level` is the first free scratch index for the
+    /// callee. A Layer evaluates Base into `pose` at `level`, takes `level`,
+    /// copies `pose` into it, evaluates the Layer branch into that buffer at
+    /// `level + 1`, blends it into `pose` under `mask × weight`, and puts
+    /// `level` back. An Overlay evaluates its input into `pose` and — only
+    /// if the channel's playing slot is *this* node's — overlays it at
+    /// `level`. Steady-state frames allocate nothing (the pool grows once to
+    /// the pipeline's depth).
+    pub fn evaluate<'a, F>(
+        &self,
+        clip_for: &F,
+        pose: &mut [LocalBoneTransform],
+        scratch: &mut PoseScratch,
+        level: usize,
+    ) where
+        F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+    {
+        self.eval(&self.plan.pipeline.root, clip_for, pose, scratch, level);
+    }
+
+    fn eval<'a, F>(
+        &self,
+        node: &PlanPose,
+        clip_for: &F,
+        pose: &mut [LocalBoneTransform],
+        scratch: &mut PoseScratch,
+        level: usize,
+    ) where
+        F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+    {
+        match node {
+            PlanPose::Machine(i) => {
+                if let Some((m, p)) = self.machine_at(*i) {
+                    eval_machine(m, p, self.params, clip_for, pose, scratch, level);
+                }
+            }
+            PlanPose::Clip(i) => {
+                let (Some(rc), Some(clock)) =
+                    (self.plan.root_clips.get(*i), self.root_clocks.get(*i))
+                else {
+                    return;
+                };
+                if let Some(clip) = clip_for(&rc.clip) {
+                    sampling::sample_channels(&clip.channels, wrapped(clock.time, clip), pose);
+                }
+            }
+            PlanPose::Layer {
+                base,
+                layer,
+                weight_param,
+                node_id,
+                ..
+            } => {
+                self.eval(base, clip_for, pose, scratch, level);
+                let w = layer_weight(self.params, weight_param);
+                let Some(mask) = self.masks.get(node_id) else { return };
+                if w <= 0.0 {
+                    return;
+                }
+                // The layer starts from the base's transforms — the
+                // pre-sample agreement every blend in this module keeps.
+                let mut buf = scratch.take(level);
+                buf.clear();
+                buf.extend_from_slice(pose);
+                self.eval(layer, clip_for, &mut buf, scratch, level + 1);
+                for (b, (out, over)) in pose.iter_mut().zip(buf.iter()).enumerate() {
+                    let k = mask.get(b).copied().unwrap_or(0.0) * w;
+                    if k > 0.0 {
+                        *out = out.blend(over, k);
                     }
                 }
+                scratch.put(level, buf);
+            }
+            PlanPose::Overlay {
+                input,
+                slot,
+                mask,
+                node_id,
+            } => {
+                self.eval(input, clip_for, pose, scratch, level);
+                if self.slot.playing() != Some(*slot) {
+                    return;
+                }
+                let mask = match mask {
+                    None => None,
+                    Some(_) => match self.masks.get(node_id) {
+                        Some(m) => Some(m.as_slice()),
+                        None => return,
+                    },
+                };
+                self.slot
+                    .apply_masked(self.plan, clip_for, pose, scratch, level, mask);
+            }
+        }
+    }
+
+    /// Append every anim event this frame's playback crossed to `out` — the
+    /// event-ownership contract (U1). The caller clears `out` once per tick.
+    /// Each source is scaled by the weight its branch is heard at: a Layer
+    /// branch by its clamped weight (0 contributes nothing), a machine or
+    /// root clip on the base side by 1, the slot by its envelope. A
+    /// **whole-body** Play Once that owns the channel suppresses everything
+    /// upstream of it by `1 − weight`; a **masked** one suppresses nothing
+    /// (markers carry no owning bone). The slot's own events fire exactly
+    /// once, at the node that owns the playing slot.
+    pub fn collect_events<'a, F>(&self, clip_for: &F, out: &mut Vec<AnimEventFire>)
+    where
+        F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+    {
+        self.events(&self.plan.pipeline.root, 1.0, clip_for, out);
+    }
+
+    fn events<'a, F>(
+        &self,
+        node: &PlanPose,
+        scale: f32,
+        clip_for: &F,
+        out: &mut Vec<AnimEventFire>,
+    ) where
+        F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+    {
+        if scale <= 0.0 {
+            return;
+        }
+        match node {
+            PlanPose::Machine(i) => {
+                if let Some((m, p)) = self.machine_at(*i) {
+                    machine_events(m, p, self.params, scale, clip_for, out);
+                }
+            }
+            PlanPose::Clip(i) => {
+                let (Some(rc), Some(clock)) =
+                    (self.plan.root_clips.get(*i), self.root_clocks.get(*i))
+                else {
+                    return;
+                };
+                // A root clip loops on its raw clock, like a leaf clip state.
+                if let Some(clip) = clip_for(&rc.clip) {
+                    for m in &clip.events {
+                        crossings(m.time_seconds, clip.duration_seconds, clock.prev, clock.time, || {
+                            out.push(AnimEventFire {
+                                name: m.name.clone(),
+                                weight: scale,
+                            })
+                        });
+                    }
+                }
+            }
+            PlanPose::Layer {
+                base,
+                layer,
+                weight_param,
+                ..
+            } => {
+                self.events(base, scale, clip_for, out);
+                let w = layer_weight(self.params, weight_param);
+                self.events(layer, scale * w, clip_for, out);
+            }
+            PlanPose::Overlay {
+                input, slot, mask, ..
+            } => {
+                if self.slot.playing() != Some(*slot) {
+                    return self.events(input, scale, clip_for, out);
+                }
+                let base_scale = if mask.is_none() {
+                    scale * (1.0 - self.slot.weight(self.plan))
+                } else {
+                    scale
+                };
+                self.events(input, base_scale, clip_for, out);
+                slot_events(self.slot, self.plan, scale, clip_for, out);
             }
         }
     }

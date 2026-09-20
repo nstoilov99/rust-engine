@@ -389,6 +389,9 @@ mod tests {
         AnimGraphRuntime {
             graph: "graphs/t.animgraph".into(),
             machine: AnimMachine::new(&plan),
+            extra_machines: Vec::new(),
+            root_clocks: Vec::new(),
+            masks: Default::default(),
             slot: PlayOnceSlot::new(),
             params: AnimParams::from_decls(&plan.parameters),
             events: Vec::new(),

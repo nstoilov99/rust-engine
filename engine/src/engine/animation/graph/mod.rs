@@ -46,8 +46,10 @@ pub use pipeline::{
     LAYER_WEIGHT_PARAM_PROP, MASK_BONES_PROP, PIPE_IN_PIN,
 };
 pub use machine::{
-    collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, Crossfade,
-    ParamValue, PlayOnceSlot, PoseScratch,
+    any_transition_activity, collect_anim_events, evaluate_pose, extra_machine_index,
+    new_extra_machines, tick_extra_machines, tick_root_clocks, whole_body_slot, AnimEventFire,
+    AnimMachine, AnimParams, Crossfade, ParamValue, PipelineState, PlayOnceSlot, PoseScratch,
+    RootClipClock,
 };
 pub use plan::{
     compile_anim_graph, compile_anim_graph_with, trigger_pin_type, upgrade_any_state,
