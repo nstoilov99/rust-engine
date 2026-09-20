@@ -19,6 +19,9 @@ use node_graph_types::std_nodes::{
 use node_graph_types::{GraphDoc, GraphRealm, GraphRegion, NodeInst, PinType, PropValue};
 
 use super::machine::{AnimParams, ParamValue};
+pub use super::pipeline::{
+    MachineSource, PlanMachineRef, PlanMask, PlanPipeline, PlanPose, PlanRootClip,
+};
 use crate::engine::animation::blend_space::BlendSpace;
 
 // ---------------------------------------------------------------------------
@@ -556,11 +559,22 @@ pub struct AnimGraphPlan {
     /// exact duplicates drop, name collisions refuse — names key
     /// `IkTargets`).
     pub ik_chains: Vec<PlanIkChain>,
+    /// The pipeline's State Machine nodes (Task 41.7), in walk order. Empty
+    /// on a nested plan — a nested document's pipeline is never compiled.
+    pub machines: Vec<PlanMachineRef>,
+    /// Index into `machines` of the inline one (`states` / `transitions` /
+    /// `entry` are its machine). 0 on an empty or nested plan.
+    pub inline_machine: usize,
+    /// Root Clip nodes, in walk order.
+    pub root_clips: Vec<PlanRootClip>,
+    /// The local-space tree and the wire orders of slots and IK chains.
+    pub pipeline: PlanPipeline,
 }
 
 impl AnimGraphPlan {
     /// Deduplicated content-relative `.anim` paths this plan samples —
-    /// nested graphs included.
+    /// nested graphs (state-nested and pipeline-nested) and root clips
+    /// included.
     pub fn clip_refs(&self) -> Vec<&str> {
         let mut refs: Vec<&str> = self
             .states
@@ -568,6 +582,11 @@ impl AnimGraphPlan {
             .flat_map(|s| s.source.clips())
             .map(|c| c.clip.as_str())
             .chain(self.slots.iter().map(|s| s.clip.clip.as_str()))
+            .chain(self.root_clips.iter().map(|c| c.clip.clip.as_str()))
+            .chain(self.machines.iter().flat_map(|m| match &m.source {
+                MachineSource::Nested { plan, .. } => plan.clip_refs(),
+                MachineSource::Inline => Vec::new(),
+            }))
             .collect();
         refs.sort_unstable();
         refs.dedup();
@@ -575,18 +594,37 @@ impl AnimGraphPlan {
     }
 }
 
+/// A compile-time warning, anchored on the node it is about. Warnings never
+/// stop a plan: the editor renders them beside refusals, the runtime prints
+/// them once at arm.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchoredWarning {
+    pub node_id: u64,
+    pub message: String,
+}
+
+/// What a successful compile returns: the plan plus its warnings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Compiled {
+    pub plan: AnimGraphPlan,
+    pub warnings: Vec<AnchoredWarning>,
+}
+
 // ---------------------------------------------------------------------------
 // Compiler
 // ---------------------------------------------------------------------------
 
-fn float_prop(props: &std::collections::BTreeMap<String, PropValue>, key: &str) -> Option<f32> {
+pub(super) fn float_prop(
+    props: &std::collections::BTreeMap<String, PropValue>,
+    key: &str,
+) -> Option<f32> {
     match props.get(key) {
         Some(PropValue::Float(f)) => Some(*f),
         _ => None,
     }
 }
 
-fn str_prop<'a>(
+pub(super) fn str_prop<'a>(
     props: &'a std::collections::BTreeMap<String, PropValue>,
     key: &str,
 ) -> Option<&'a str> {
@@ -677,7 +715,7 @@ impl<F: Fn(&str) -> Option<GraphDoc>> AnimGraphLoader for F {
 /// refuses with "could not be loaded" / "not found". The seam for callers
 /// that know their document is self-contained (and for the editor's rule
 /// projection); everything else goes through [`compile_anim_graph_with`].
-pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
+pub fn compile_anim_graph(doc: &GraphDoc) -> Result<Compiled, String> {
     compile_anim_graph_with(doc, "", &|_: &str| None)
 }
 
@@ -690,18 +728,19 @@ pub fn compile_anim_graph(doc: &GraphDoc) -> Result<AnimGraphPlan, String> {
 /// Refusals are author errors, phrased against the node that caused them;
 /// a nested graph's refusal is wrapped with the referencing state and file
 /// ("state 'Locomotion': in 'graphs/loco.animgraph': …"), so the anchored
-/// error lands on the state whose reference is broken.
+/// error lands on the state whose reference is broken. Warnings (ignored
+/// pipeline nodes, lifted nested slots/chains) ride along on `Ok`.
 pub fn compile_anim_graph_with(
     doc: &GraphDoc,
     path: &str,
     load: &dyn AnimGraphLoader,
-) -> Result<AnimGraphPlan, String> {
+) -> Result<Compiled, String> {
     let mut stack = Vec::new();
     let root = crate::engine::scripting::normalize_graph_path(path);
     if !root.is_empty() {
         stack.push(root);
     }
-    compile_doc(doc, &mut stack, load)
+    compile_doc(doc, &mut stack, load, true)
 }
 
 /// Rewrite every legacy Any State node ([`ANIM_ANY_STATE_TYPE_ID`]) in place
@@ -733,17 +772,25 @@ pub fn upgrade_any_state(doc: &mut GraphDoc) -> usize {
 
 /// One document of the nesting tree. `stack` holds the normalized paths
 /// currently being compiled, root-first — a nested reference back into it is
-/// a cycle, refused with the chain spelled out.
-fn compile_doc(
+/// a cycle, refused with the chain spelled out. `root` = the document being
+/// compiled (its pipeline is walked); a nested document contributes its
+/// machine, slots and chains only (D3.7).
+pub(super) fn compile_doc(
     doc: &GraphDoc,
     stack: &mut Vec<String>,
     load: &dyn AnimGraphLoader,
-) -> Result<AnimGraphPlan, String> {
-    // A pre-alias document compiles as its upgraded self; the caller's copy
-    // stays untouched (the editor migrates its own on open).
+    root: bool,
+) -> Result<Compiled, String> {
+    // A pre-alias or pre-pipeline document compiles as its upgraded self —
+    // the implicit pipeline *is* what the upgrade writes, so the two can
+    // never disagree; the caller's copy stays untouched (the editor
+    // migrates its own on open).
     let mut current = std::borrow::Cow::Borrowed(doc);
     if doc.nodes.iter().any(|n| n.type_id == ANIM_ANY_STATE_TYPE_ID) {
         upgrade_any_state(current.to_mut());
+    }
+    if root && super::pipeline::needs_pipeline_root(doc) {
+        super::pipeline::upgrade_pipeline_root(current.to_mut());
     }
     let doc = &*current;
 
@@ -761,7 +808,80 @@ fn compile_doc(
     // Parameters first, from the document's variables — states need them to
     // validate the parameters their blend trees read.
     let parameters = compile_parameters(doc)?;
+    let MachinePart {
+        states,
+        transitions,
+        entry,
+        mut nested_params,
+    } = compile_machine(doc, stack, load, &parameters)?;
+    let super::pipeline::Assembly {
+        slots,
+        ik_chains,
+        machines,
+        inline_machine,
+        root_clips,
+        pipeline,
+        nested_params: pipe_params,
+        warnings,
+    } = super::pipeline::assemble(doc, stack, load, &parameters, &states, root)?;
+    nested_params.extend(pipe_params);
 
+    // Nested declarations join the blackboard: one shared surface drives the
+    // whole machine tree, so gameplay writes the union. Same name and type
+    // collapse to one entry (this document's declaration and default win); a
+    // type conflict refuses, or the nested rules would read a value of the
+    // wrong shape at runtime.
+    let mut parameters = parameters;
+    for (who, d) in nested_params {
+        match parameters.iter().find(|p| p.slug == d.slug) {
+            None => parameters.push(d),
+            Some(p) if p.ty == d.ty => {}
+            Some(p) => {
+                return Err(format!(
+                    "{who}: parameter '{}' is a {:?} in the nested graph but a \
+                     {:?} here — one blackboard drives the whole machine, so the types \
+                     must agree",
+                    d.slug, d.ty, p.ty
+                ))
+            }
+        }
+    }
+
+    Ok(Compiled {
+        plan: AnimGraphPlan {
+            states,
+            transitions,
+            entry,
+            parameters,
+            slots,
+            ik_chains,
+            machines,
+            inline_machine,
+            root_clips,
+            pipeline,
+        },
+        warnings,
+    })
+}
+
+/// The machine half of a document: states, transitions, ENTRY, and what
+/// state-nested graphs add to the blackboard (with the state that brought
+/// each declaration in, for refusal anchoring).
+struct MachinePart {
+    states: Vec<PlanState>,
+    transitions: Vec<PlanTransition>,
+    entry: usize,
+    nested_params: Vec<(String, ParamDecl)>,
+}
+
+/// Compile the machine family. Refuses exactly as before 41.7: at least one
+/// state, exactly one ENTRY wired to a state, every transition resolved.
+fn compile_machine(
+    doc: &GraphDoc,
+    stack: &mut Vec<String>,
+    load: &dyn AnimGraphLoader,
+    parameters: &[ParamDecl],
+) -> Result<MachinePart, String> {
     // States, in document order (index = plan identity). A state with a
     // non-empty region compiles it as a blend tree; a `graph` property makes
     // it a nested sub-state-machine; a `space` property plays a blend space;
@@ -778,7 +898,7 @@ fn compile_doc(
         let nested = str_prop(&n.properties, GRAPH_PROP).filter(|s| !s.trim().is_empty());
         let space = str_prop(&n.properties, SPACE_PROP).filter(|s| !s.trim().is_empty());
         let source = match doc.regions.get(&n.id).filter(|r| !r.nodes.is_empty()) {
-            Some(region) => PoseSource::Tree(compile_tree(region, &name, &parameters)?),
+            Some(region) => PoseSource::Tree(compile_tree(region, &name, parameters)?),
             None if nested.is_some() => {
                 let child_rel = crate::engine::scripting::normalize_graph_path(
                     nested.unwrap_or_default(),
@@ -798,21 +918,21 @@ fn compile_doc(
                     format!("state '{name}': nested graph '{child_rel}' could not be loaded")
                 })?;
                 stack.push(child_rel.clone());
-                let child = compile_doc(&child_doc, stack, load)
+                let child = compile_doc(&child_doc, stack, load, false)
                     .map_err(|e| format!("state '{name}': in '{child_rel}': {e}"))?;
                 stack.pop();
-                for d in &child.parameters {
-                    nested_params.push((name.clone(), d.clone()));
+                for d in &child.plan.parameters {
+                    nested_params.push((format!("state '{name}'"), d.clone()));
                 }
                 PoseSource::Machine {
                     graph: child_rel,
-                    plan: std::sync::Arc::new(child),
+                    plan: std::sync::Arc::new(child.plan),
                 }
             }
             None if space.is_some() => PoseSource::Tree(PlanTree::Space(compile_space(
                 &name,
                 space.unwrap_or_default(),
-                &parameters,
+                parameters,
                 load,
             )?)),
             None => {
@@ -947,7 +1067,7 @@ fn compile_doc(
             Some(indices) => indices.iter().copied().filter(|&s| s != to).collect(),
             None => single.into_iter().collect(),
         };
-        let rule = compile_rule(doc, n.id, &parameters)?;
+        let rule = compile_rule(doc, n.id, parameters)?;
         let duration = float_prop(&n.properties, DURATION_PROP)
             .unwrap_or(0.0)
             .max(0.0);
@@ -969,282 +1089,11 @@ fn compile_doc(
     // Evaluation order is the sort order: lower priority value first, node id
     // as the deterministic tiebreak.
     transitions.sort_by_key(|t| (t.priority, t.node_id));
-
-    // Play-once slots: a clip, a starting Trigger, an overlay envelope.
-    let mut slots: Vec<PlanSlot> = Vec::new();
-    for n in doc
-        .nodes
-        .iter()
-        .filter(|n| n.type_id == ANIM_PLAY_ONCE_TYPE_ID)
-    {
-        let name = n.title.clone().unwrap_or_else(|| format!("Slot {}", n.id));
-        let clip = str_prop(&n.properties, CLIP_PROP)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| {
-                format!("play-once slot '{name}' names no clip (property `{CLIP_PROP}`)")
-            })?;
-        let trigger = match n.properties.get(SLOT_TRIGGER_PROP) {
-            Some(PropValue::Str(s)) if !s.is_empty() => s.clone(),
-            _ => {
-                return Err(format!(
-                    "play-once slot '{name}' names no trigger (property `{SLOT_TRIGGER_PROP}`)"
-                ))
-            }
-        };
-        match parameters.iter().find(|p| p.slug == trigger) {
-            None => {
-                return Err(format!(
-                    "play-once slot '{name}': parameter '{trigger}' is not declared"
-                ))
-            }
-            Some(p) if p.ty != AnimParamType::Trigger => {
-                return Err(format!(
-                    "play-once slot '{name}': parameter '{trigger}' is not a Trigger"
-                ))
-            }
-            Some(_) => {}
-        }
-        slots.push(PlanSlot {
-            node_id: n.id,
-            name,
-            clip: PlanClip {
-                clip: crate::engine::scripting::normalize_graph_path(clip),
-                clip_name: str_prop(&n.properties, CLIP_NAME_PROP)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string),
-            },
-            trigger,
-            speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
-            fade_in: float_prop(&n.properties, SLOT_FADE_IN_PROP)
-                .unwrap_or(0.0)
-                .max(0.0),
-            fade_out: float_prop(&n.properties, SLOT_FADE_OUT_PROP)
-                .unwrap_or(0.0)
-                .max(0.0),
-        });
-    }
-    slots.sort_by_key(|s| s.node_id);
-
-    // Nested graphs' slots join the root's single override channel, after
-    // this document's own (deterministic: host slots by node id, then nested
-    // in state order). Nesting one graph twice would clone its slots — exact
-    // duplicates are dropped, the channel needs only one.
-    let nested_slots: Vec<PlanSlot> = states
-        .iter()
-        .filter_map(|s| match &s.source {
-            PoseSource::Machine { plan, .. } => Some(plan.slots.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    for s in nested_slots {
-        if !slots.contains(&s) {
-            slots.push(s);
-        }
-    }
-
-    // IK chains (Task 41.5 P5): standalone nodes, like slots. Bone existence
-    // is an arm-time check (the compiler never sees a skeleton); everything
-    // knowable from the document refuses here, anchored on the chain.
-    let mut ik_chains: Vec<PlanIkChain> = Vec::new();
-    for n in doc
-        .nodes
-        .iter()
-        .filter(|n| n.type_id == ANIM_IK_CHAIN_TYPE_ID)
-    {
-        let name = n
-            .title
-            .clone()
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| format!("IK {}", n.id));
-        let bones: Vec<String> = str_prop(&n.properties, IK_BONES_PROP)
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        if bones.is_empty() {
-            return Err(format!(
-                "IK chain '{name}' names no bones (property `{IK_BONES_PROP}`: \
-                 comma-separated bone names, root\u{2192}tip)"
-            ));
-        }
-        let solver_slug = match n.properties.get(IK_SOLVER_PROP) {
-            Some(PropValue::Enum(s)) | Some(PropValue::Str(s)) if !s.is_empty() => s.as_str(),
-            _ => IK_SOLVER_TWO_BONE,
-        };
-        let solver = match solver_slug {
-            IK_SOLVER_TWO_BONE => {
-                if bones.len() != 3 {
-                    return Err(format!(
-                        "IK chain '{name}': the two-bone solver takes exactly 3 bones \
-                         (root, mid, tip), got {}",
-                        bones.len()
-                    ));
-                }
-                PlanIkSolver::TwoBone
-            }
-            IK_SOLVER_LOOK_AT => {
-                if bones.len() != 1 {
-                    return Err(format!(
-                        "IK chain '{name}': the look-at solver takes exactly 1 bone, got {}",
-                        bones.len()
-                    ));
-                }
-                let axis = glam::Vec3::new(
-                    float_prop(&n.properties, IK_AXIS_X_PROP).unwrap_or(0.0),
-                    float_prop(&n.properties, IK_AXIS_Y_PROP).unwrap_or(0.0),
-                    float_prop(&n.properties, IK_AXIS_Z_PROP).unwrap_or(1.0),
-                );
-                if axis.length_squared() < 1e-8 {
-                    return Err(format!("IK chain '{name}': the aim axis is zero"));
-                }
-                PlanIkSolver::LookAt {
-                    axis: axis.normalize(),
-                    max_angle: float_prop(&n.properties, IK_MAX_ANGLE_PROP)
-                        .unwrap_or(90.0)
-                        .max(0.0)
-                        .to_radians(),
-                }
-            }
-            other => {
-                return Err(format!(
-                    "IK chain '{name}': unknown solver '{other}' (the solvers are \
-                     '{IK_SOLVER_TWO_BONE}' and '{IK_SOLVER_LOOK_AT}')"
-                ))
-            }
-        };
-        let weight_param = match n.properties.get(IK_WEIGHT_PARAM_PROP) {
-            Some(PropValue::Str(s)) if !s.is_empty() => s.clone(),
-            _ => {
-                return Err(format!(
-                    "IK chain '{name}' names no weight parameter \
-                     (property `{IK_WEIGHT_PARAM_PROP}`)"
-                ))
-            }
-        };
-        match parameters.iter().find(|p| p.slug == weight_param) {
-            Some(p) if p.ty == AnimParamType::Float => {}
-            Some(_) => {
-                return Err(format!(
-                    "IK chain '{name}': parameter '{weight_param}' is not a Float"
-                ))
-            }
-            None => {
-                return Err(format!(
-                    "IK chain '{name}': parameter '{weight_param}' is not declared"
-                ))
-            }
-        }
-        // Foot placement (P6): opt-in per chain, two-bone only — the tip
-        // bone is the foot, so a look-at chain has nothing to plant.
-        let foot = match n.properties.get(IK_FOOT_PROP) {
-            Some(PropValue::Bool(true)) => {
-                if !matches!(solver, PlanIkSolver::TwoBone) {
-                    return Err(format!(
-                        "IK chain '{name}': foot placement needs the \
-                         '{IK_SOLVER_TWO_BONE}' solver"
-                    ));
-                }
-                Some(PlanFootPlacement {
-                    ankle_offset: float_prop(&n.properties, IK_ANKLE_OFFSET_PROP)
-                        .unwrap_or(0.1),
-                    pelvis_bone: str_prop(&n.properties, IK_PELVIS_PROP)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string(),
-                })
-            }
-            _ => None,
-        };
-        ik_chains.push(PlanIkChain {
-            node_id: n.id,
-            name,
-            bones,
-            solver,
-            weight_param,
-            foot,
-        });
-    }
-    // Nested graphs' chains act on the same skeleton, so they join the
-    // host's list (exact duplicates from nesting one graph twice drop).
-    let nested_chains: Vec<PlanIkChain> = states
-        .iter()
-        .filter_map(|s| match &s.source {
-            PoseSource::Machine { plan, .. } => Some(plan.ik_chains.clone()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    for c in nested_chains {
-        if !ik_chains.contains(&c) {
-            ik_chains.push(c);
-        }
-    }
-    // Sort after the merge so the "applied in node-id order" contract holds
-    // across host + nested chains (stable: host wins ties on cross-document
-    // id collisions).
-    ik_chains.sort_by_key(|c| c.node_id);
-    // Chain names key the `IkTargets` component, so they must be unique.
-    for (i, c) in ik_chains.iter().enumerate() {
-        if ik_chains[..i].iter().any(|o| o.name == c.name) {
-            return Err(format!(
-                "two IK chains are named '{}' — chain names key the IkTargets \
-                 component, so they must be unique",
-                c.name
-            ));
-        }
-    }
-    // One pelvis drives the character: every foot chain that names a pelvis
-    // bone must name the same one (nested chains included).
-    let mut pelvis: Option<(&str, &str)> = None;
-    for c in &ik_chains {
-        let Some(f) = &c.foot else { continue };
-        if f.pelvis_bone.is_empty() {
-            continue;
-        }
-        match pelvis {
-            None => pelvis = Some((&c.name, &f.pelvis_bone)),
-            Some((_, b)) if b == f.pelvis_bone => {}
-            Some((other, b)) => {
-                return Err(format!(
-                    "IK chains '{other}' and '{}' name different pelvis bones \
-                     ('{b}' vs '{}') — one pelvis drives the character",
-                    c.name, f.pelvis_bone
-                ))
-            }
-        }
-    }
-
-    // Nested declarations join the blackboard: one shared surface drives the
-    // whole machine tree, so gameplay writes the union. Same name and type
-    // collapse to one entry (this document's declaration and default win); a
-    // type conflict refuses, or the nested rules would read a value of the
-    // wrong shape at runtime.
-    let mut parameters = parameters;
-    for (state, d) in nested_params {
-        match parameters.iter().find(|p| p.slug == d.slug) {
-            None => parameters.push(d),
-            Some(p) if p.ty == d.ty => {}
-            Some(p) => {
-                return Err(format!(
-                    "state '{state}': parameter '{}' is a {:?} in the nested graph but a \
-                     {:?} here — one blackboard drives the whole machine, so the types \
-                     must agree",
-                    d.slug, d.ty, p.ty
-                ))
-            }
-        }
-    }
-
-    Ok(AnimGraphPlan {
+    Ok(MachinePart {
         states,
         transitions,
         entry,
-        parameters,
-        slots,
-        ik_chains,
+        nested_params,
     })
 }
 

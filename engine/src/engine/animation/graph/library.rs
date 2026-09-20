@@ -9,14 +9,17 @@
 //! practice: a script palette never offers a State, an animation palette
 //! never offers a Print, and neither needs a filter to stay that way.
 //!
-//! Two registries live here, one per canvas context — which is how placement
-//! is gated without a filter in sight:
-//! [`anim_node_registry`] holds the **machine-level** nodes (the five things
-//! placeable on the state-machine canvas), and [`anim_rule_registry`] holds
-//! the **rule-region** library (ticket 05: the peek canvas inside a
-//! transition) — the std comparison/math/logic nodes plus the RESULT sink.
-//! A palette lists exactly what its canvas's registry holds, so a State can
-//! never land inside a rule and a Compare can never land on the machine.
+//! Registries live here per canvas context — which is how placement is
+//! gated without a filter in sight: [`anim_machine_registry`] holds the
+//! **machine** family (the state-machine scope), [`anim_pipeline_registry`]
+//! the **pipeline** family (the root scope, Task 41.7), and
+//! [`anim_rule_registry`] the **rule-region** library (ticket 05: the peek
+//! canvas inside a transition) — the std comparison/math/logic nodes plus the
+//! RESULT sink. A palette lists exactly what its scope's registry holds, so a
+//! State can never land inside a rule and a Compare can never land on the
+//! machine. [`anim_node_registry`] is the union of the machine and pipeline
+//! families: the *document* is one flat list holding both, and validation,
+//! migration and pin theming resolve against it.
 //! (`var_get`/`reroute` are reserved doc-dependent types with no descriptor;
 //! they arrive via the variables strip and wire gestures, and the rule
 //! compiler's whitelist is what vouches for them.)
@@ -27,10 +30,15 @@ use node_graph_types::std_nodes::{
 };
 use node_graph_types::{Edge, GraphDoc, GraphRealm, NodeInst, NodeRealm, PinType};
 
+use super::pipeline::{
+    ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID, LAYER_BASE_PIN,
+    LAYER_LAYER_PIN, PIPE_IN_PIN,
+};
 use super::plan::{
-    ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_RULE_RESULT_TYPE_ID,
-    ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, RULE_RESULT_PIN,
-    STATE_IN_PIN, STATE_OUT_PIN, TRANSITION_FROM_PIN, TRANSITION_TO_PIN, TRIGGER_PARAM_DOMAIN,
+    ANIM_CLIP_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID,
+    ANIM_RULE_RESULT_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
+    ANIM_TRANSITION_TYPE_ID, POSE_PIN, RULE_RESULT_PIN, STATE_IN_PIN, STATE_OUT_PIN,
+    TRANSITION_FROM_PIN, TRANSITION_TO_PIN, TRIGGER_PARAM_DOMAIN,
 };
 
 /// The machine-topology wire: state → transition → state. Not a Pose and not
@@ -49,10 +57,11 @@ pub const ANIM_POSE_DOMAIN: &str = "anim_pose";
 pub const ANIM_CATEGORY: &str = "Animation";
 
 /// The 9px mono header tag for an animation node — the mockup's vocabulary
-/// (STATE / ENTRY / ALIAS / SLOT / TRANS), overriding the derived PURE/EVENT
-/// tags, which describe exec flow and mean nothing in a domain that has
-/// none. A transition's tag only shows on its unfolded (selected) card —
-/// the at-rest chip has no header.
+/// (STATE / ENTRY / ALIAS / SLOT / TRANS, and the pipeline's MACHINE / CLIP
+/// / LAYER / OUTPUT), overriding the derived PURE/EVENT tags, which describe
+/// exec flow and mean nothing in a domain that has none. A transition's tag
+/// only shows on its unfolded (selected) card — the at-rest chip has no
+/// header.
 pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
     match type_id {
         ANIM_STATE_TYPE_ID => Some("STATE"),
@@ -61,6 +70,10 @@ pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
         ANIM_PLAY_ONCE_TYPE_ID => Some("SLOT"),
         ANIM_IK_CHAIN_TYPE_ID => Some("IK"),
         ANIM_TRANSITION_TYPE_ID => Some("TRANS"),
+        ANIM_PIPE_MACHINE_TYPE_ID => Some("MACHINE"),
+        ANIM_CLIP_TYPE_ID => Some("CLIP"),
+        ANIM_PIPE_LAYER_TYPE_ID => Some("LAYER"),
+        ANIM_PIPE_OUTPUT_TYPE_ID => Some("OUTPUT"),
         // The rule canvas's one sink (mockup: "RESULT ◉ Bool").
         ANIM_RULE_RESULT_TYPE_ID => Some("RESULT"),
         _ => None,
@@ -69,6 +82,10 @@ pub fn anim_node_tag(type_id: &str) -> Option<&'static str> {
 
 fn flow_pin(slug: &str, label: &str) -> PinDescriptor {
     PinDescriptor::new(slug, label, PinType::Domain(ANIM_FLOW_DOMAIN.to_string()))
+}
+
+fn pose_pin(slug: &str, label: &str) -> PinDescriptor {
+    PinDescriptor::new(slug, label, PinType::Domain(ANIM_POSE_DOMAIN.to_string()))
 }
 
 fn desc(
@@ -96,17 +113,51 @@ fn desc(
     }
 }
 
-/// Build the animation node library. Machine nodes only — see module docs.
-pub fn anim_node_registry() -> NodeRegistry {
-    let mut reg = NodeRegistry::new();
+/// The three animation domains, registered on every animation registry so a
+/// wire resolves to the same hue whichever scope draws it.
+fn register_domains(reg: &mut NodeRegistry) {
     // Machine topology is *flow*, not a pulled value: several transitions may
     // target one state (fan-in) and Idle → Locomotion → Idle is a legal
     // cycle, so `anim_flow` registers flow-like.
     reg.register_domain_pin_flow(ANIM_FLOW_DOMAIN, 2); // gold — Flow's slot
     reg.register_domain_pin_keyed(ANIM_POSE_DOMAIN, 11); // rose — animation's slot
     reg.register_domain_pin_keyed(TRIGGER_PARAM_DOMAIN, 0); // ember — Bool/Event family
+}
 
-    let all = [
+/// The whole animation node library: machine and pipeline families. What the
+/// editor validates, migrates and themes a document against.
+pub fn anim_node_registry() -> NodeRegistry {
+    let mut reg = NodeRegistry::new();
+    register_domains(&mut reg);
+    for d in machine_descriptors().into_iter().chain(pipeline_descriptors()) {
+        reg.register(d).expect("anim library descriptors are valid");
+    }
+    reg
+}
+
+/// The machine scope's palette: entry, state, alias, transition.
+pub fn anim_machine_registry() -> NodeRegistry {
+    let mut reg = NodeRegistry::new();
+    register_domains(&mut reg);
+    for d in machine_descriptors() {
+        reg.register(d).expect("anim machine descriptors are valid");
+    }
+    reg
+}
+
+/// The pipeline scope's palette (Task 41.7): pose sources, layers, play-once
+/// overlays, IK chains, Output Pose.
+pub fn anim_pipeline_registry() -> NodeRegistry {
+    let mut reg = NodeRegistry::new();
+    register_domains(&mut reg);
+    for d in pipeline_descriptors() {
+        reg.register(d).expect("anim pipeline descriptors are valid");
+    }
+    reg
+}
+
+fn machine_descriptors() -> Vec<NodeDescriptor> {
+    vec![
         desc(
             ANIM_ENTRY_TYPE_ID,
             "Entry",
@@ -135,26 +186,58 @@ pub fn anim_node_registry() -> NodeRegistry {
             vec![flow_pin(TRANSITION_FROM_PIN, "From")],
             vec![flow_pin(TRANSITION_TO_PIN, "To")],
         ),
+    ]
+}
+
+fn pipeline_descriptors() -> Vec<NodeDescriptor> {
+    vec![
+        desc(
+            ANIM_PIPE_MACHINE_TYPE_ID,
+            "State Machine",
+            "A pose source: this document's state machine (Graph empty), or a nested \
+             .animgraph's machine run as its own instance.",
+            vec![],
+            vec![pose_pin(POSE_PIN, "Pose")],
+        ),
+        desc(
+            ANIM_CLIP_TYPE_ID,
+            "Clip",
+            "A looping clip as a pose source, with its own clock and event track.",
+            vec![],
+            vec![pose_pin(POSE_PIN, "Pose")],
+        ),
+        desc(
+            ANIM_PIPE_LAYER_TYPE_ID,
+            "Layered Blend Per Bone",
+            "Blends Layer over Base on the bones under the mask roots, weighted by a \
+             Float parameter. Base is evaluated first.",
+            vec![pose_pin(LAYER_BASE_PIN, "Base"), pose_pin(LAYER_LAYER_PIN, "Layer")],
+            vec![pose_pin(POSE_PIN, "Pose")],
+        ),
         desc(
             ANIM_PLAY_ONCE_TYPE_ID,
             "Play-Once Slot",
-            "Plays a clip over the base result when its Trigger fires, then returns.",
-            vec![],
-            vec![],
+            "Plays a clip over its input when its Trigger fires, then passes the input \
+             through again. Bones masks it; empty = whole body.",
+            vec![pose_pin(PIPE_IN_PIN, "In")],
+            vec![pose_pin(POSE_PIN, "Pose")],
         ),
         desc(
             ANIM_IK_CHAIN_TYPE_ID,
             "IK Chain",
-            "A post-pose IK pass — two-bone (foot, hand) or look-at — faded by a Float \
+            "A model-space IK pass — two-bone (foot, hand) or look-at — faded by a Float \
              parameter. Foot mode adds ground raycasts, plant locking and pelvis drop.",
-            vec![],
+            vec![pose_pin(PIPE_IN_PIN, "In")],
+            vec![pose_pin(POSE_PIN, "Pose")],
+        ),
+        desc(
+            ANIM_PIPE_OUTPUT_TYPE_ID,
+            "Output Pose",
+            "The pipeline's single sink: what the character shows.",
+            vec![pose_pin(PIPE_IN_PIN, "In")],
             vec![],
         ),
-    ];
-    for d in all {
-        reg.register(d).expect("anim library descriptors are valid");
-    }
-    reg
+    ]
 }
 
 /// The std node types a rule region may contain — the editor-side face of the
@@ -235,21 +318,30 @@ mod tests {
     use crate::engine::animation::graph::compile_anim_graph;
     use node_graph_types::validate_doc;
 
-    /// The five machine nodes register, the three domains resolve, and the
-    /// palette grouping puts everything under one category.
+    const MACHINE: [&str; 4] = [
+        ANIM_ENTRY_TYPE_ID,
+        ANIM_STATE_TYPE_ID,
+        ANIM_STATE_ALIAS_TYPE_ID,
+        ANIM_TRANSITION_TYPE_ID,
+    ];
+    const PIPELINE: [&str; 6] = [
+        ANIM_PIPE_MACHINE_TYPE_ID,
+        ANIM_CLIP_TYPE_ID,
+        ANIM_PIPE_LAYER_TYPE_ID,
+        ANIM_PLAY_ONCE_TYPE_ID,
+        ANIM_IK_CHAIN_TYPE_ID,
+        ANIM_PIPE_OUTPUT_TYPE_ID,
+    ];
+
+    /// Both families register, the three domains resolve, and the palette
+    /// grouping puts everything under one category.
     #[test]
     fn the_library_registers_the_machine_nodes() {
         let reg = anim_node_registry();
-        for id in [
-            ANIM_ENTRY_TYPE_ID,
-            ANIM_STATE_TYPE_ID,
-            ANIM_STATE_ALIAS_TYPE_ID,
-            ANIM_TRANSITION_TYPE_ID,
-            ANIM_PLAY_ONCE_TYPE_ID,
-            ANIM_IK_CHAIN_TYPE_ID,
-        ] {
+        for id in MACHINE.iter().chain(PIPELINE.iter()) {
             assert!(reg.get(id).is_some(), "{id}");
             assert_eq!(reg.get(id).unwrap().category, ANIM_CATEGORY);
+            assert!(anim_node_tag(id).is_some(), "{id} wears a header tag");
         }
         // The palette is registry-driven: the legacy Any State is not in it.
         assert!(reg.get(super::super::plan::ANIM_ANY_STATE_TYPE_ID).is_none());
@@ -271,14 +363,7 @@ mod tests {
             assert!(rules.get(id).is_some(), "rule registry misses {id}");
             assert!(machine.get(id).is_none(), "machine registry must not offer {id}");
         }
-        for id in [
-            ANIM_ENTRY_TYPE_ID,
-            ANIM_STATE_TYPE_ID,
-            ANIM_STATE_ALIAS_TYPE_ID,
-            ANIM_TRANSITION_TYPE_ID,
-            ANIM_PLAY_ONCE_TYPE_ID,
-            ANIM_IK_CHAIN_TYPE_ID,
-        ] {
+        for id in MACHINE.iter().chain(PIPELINE.iter()) {
             assert!(rules.get(id).is_none(), "rule registry must not offer {id}");
         }
         assert_eq!(
@@ -286,6 +371,50 @@ mod tests {
             ANIM_CATEGORY
         );
         assert_eq!(rules.domain_registration(TRIGGER_PARAM_DOMAIN), Some(Some(0)));
+    }
+
+    /// The two scopes partition the library (Task 41.7): the machine palette
+    /// offers no pipeline node and vice versa, and the union is exactly the
+    /// document registry — so a slot or IK chain can only be placed on the
+    /// pipeline canvas, and the pipeline pins (Play Once / IK Chain in+out,
+    /// Layer base+layer, Output in) are as the compiler expects.
+    #[test]
+    fn the_machine_and_pipeline_scopes_partition_the_library() {
+        let machine = anim_machine_registry();
+        let pipeline = anim_pipeline_registry();
+        let all = anim_node_registry();
+        for id in MACHINE {
+            assert!(machine.get(id).is_some(), "{id}");
+            assert!(pipeline.get(id).is_none(), "{id}");
+        }
+        for id in PIPELINE {
+            assert!(pipeline.get(id).is_some(), "{id}");
+            assert!(machine.get(id).is_none(), "{id}");
+        }
+        assert_eq!(all.iter().count(), MACHINE.len() + PIPELINE.len());
+        for reg in [&machine, &pipeline, &all] {
+            assert_eq!(reg.domain_registration(ANIM_POSE_DOMAIN), Some(Some(11)));
+        }
+        let pins = |id: &str| {
+            let d = pipeline.get(id).unwrap();
+            (
+                d.inputs.iter().map(|p| p.slug.clone()).collect::<Vec<_>>(),
+                d.outputs.iter().map(|p| p.slug.clone()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(pins(ANIM_PIPE_MACHINE_TYPE_ID), (vec![], vec![POSE_PIN.to_string()]));
+        assert_eq!(pins(ANIM_CLIP_TYPE_ID), (vec![], vec![POSE_PIN.to_string()]));
+        assert_eq!(
+            pins(ANIM_PIPE_LAYER_TYPE_ID),
+            (
+                vec![LAYER_BASE_PIN.to_string(), LAYER_LAYER_PIN.to_string()],
+                vec![POSE_PIN.to_string()]
+            )
+        );
+        for id in [ANIM_PLAY_ONCE_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID] {
+            assert_eq!(pins(id), (vec![PIPE_IN_PIN.to_string()], vec![POSE_PIN.to_string()]));
+        }
+        assert_eq!(pins(ANIM_PIPE_OUTPUT_TYPE_ID), (vec![PIPE_IN_PIN.to_string()], vec![]));
     }
 
     /// A fresh document validates clean against the library — its one

@@ -19,7 +19,12 @@ use std::collections::BTreeMap;
 /// - **v3** — Task 41: `GraphDoc::regions` — embedded per-node graph regions
 ///   ("virtual subgraphs", animation transition rules). Defaulted and skipped
 ///   when empty, so a document without regions serializes as it did before.
-pub const GRAPH_DOC_VERSION: u32 = 3;
+/// - **v4** — Task 41.7: `CommentBox::family` / `GroupBox::family` — a
+///   consumer-defined scope tag on annotations (the animation domain's
+///   machine / pipeline canvases). Defaulted and skipped when unset. The
+///   animation pipeline root itself is a *structural* upgrade in the engine
+///   (`upgrade_pipeline_root`), not a container step.
+pub const GRAPH_DOC_VERSION: u32 = 4;
 
 /// The realm a graph targets. Validated against each node type's
 /// [`NodeRealm`] so authority violations are caught at edit time, before any
@@ -341,6 +346,13 @@ pub struct CommentBox {
     /// Folded to its NOTE bar.
     #[serde(default)]
     pub collapsed: bool,
+    /// Consumer-defined scope tag (container v4): which of a document's
+    /// canvases the note belongs to when one document holds several (the
+    /// animation domain's `"machine"` / `"pipeline"`). `None` = the
+    /// consumer's default scope; skipped on write so untagged documents do
+    /// not churn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
 }
 
 /// The `font_scale` range. A note may be a heading or fine print, but not a
@@ -374,6 +386,7 @@ impl Default for CommentBox {
             font_scale: 1.0,
             anchor: None,
             collapsed: false,
+            family: None,
         }
     }
 }
@@ -391,6 +404,9 @@ pub struct GroupBox {
     /// Folded to its title bar.
     #[serde(default)]
     pub collapsed: bool,
+    /// Scope tag, as [`CommentBox::family`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
 }
 
 /// An embedded graph region — a "virtual subgraph" living *inside* a parent

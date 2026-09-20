@@ -908,7 +908,15 @@ impl AnimGraphSystem {
                     .load_graph(graph)
                     .ok_or_else(|| format!("'{graph}' could not be loaded"))
                     .and_then(|doc| compile_anim_graph_with(&doc, graph, &load))
-                    .map(Arc::new);
+                    .map(|c| {
+                        // Once per compile (the cache holds the plan), so an
+                        // ignored pipeline node or a lifted nested chain is
+                        // said out loud without spamming every entity.
+                        for w in &c.warnings {
+                            eprintln!("animgraph '{graph}': warning: {}", w.message);
+                        }
+                        Arc::new(c.plan)
+                    });
                 drop(load);
                 if let Some(cache) = resources.get_mut::<AnimGraphPlanCache>() {
                     cache.store(graph, compiled.clone());

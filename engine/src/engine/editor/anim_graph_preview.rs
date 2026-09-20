@@ -230,7 +230,7 @@ impl AnimGraphPreview {
         graphs: &dyn AnimGraphLoader,
     ) {
         let plan = match compile_anim_graph_with(doc, path, graphs) {
-            Ok(p) => Arc::new(p),
+            Ok(c) => Arc::new(c.plan),
             Err(e) => {
                 self.compile_error = Some(e);
                 return;

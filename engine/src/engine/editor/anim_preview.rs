@@ -380,8 +380,7 @@ mod tests {
                     default: ParamValue::Trigger(false),
                 },
             ],
-            slots: Vec::new(),
-            ik_chains: Vec::new(),
+            ..AnimGraphPlan::default()
         }
     }
 

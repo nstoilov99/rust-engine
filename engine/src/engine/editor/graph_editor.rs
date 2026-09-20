@@ -7791,6 +7791,14 @@ mod tests {
         n
     }
 
+    /// The `version: N` a RON graph file carries.
+    fn text_version(text: &str) -> u32 {
+        text.split("version:")
+            .nth(1)
+            .and_then(|r| r.trim().split(',').next()?.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
     /// A group is **display metadata**: unset it serializes to nothing at all
     /// (so a document nobody grouped is byte-identical to one from before
     /// groups existed), setting it moves no declaration, and undo restores the
@@ -7811,10 +7819,17 @@ mod tests {
         );
         // The claim that matters: a committed file nobody grouped still
         // serializes to exactly the bytes on disk after the field was added.
+        // (Modulo the container stamp: a version bump legitimately restamps
+        // a loaded file; the claim here is about `group`.)
         let on_disk = Path::new("../content/graphs/runner_demo.graph");
         if let Ok(text) = std::fs::read_to_string(on_disk) {
             let doc = load_graph(on_disk).expect("the committed demo graph parses");
-            assert_eq!(bytes(&doc), text, "adding `group` must not rewrite old files");
+            let stamped = text.replacen(
+                &format!("version: {}", text_version(&text)),
+                &format!("version: {}", doc.version),
+                1,
+            );
+            assert_eq!(bytes(&doc), stamped, "adding `group` must not rewrite old files");
         }
 
         assert!(st.set_variable_group("score", Some("State".into()), &reg));

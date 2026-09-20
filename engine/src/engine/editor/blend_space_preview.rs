@@ -21,8 +21,8 @@ use crate::engine::animation::blend_space::{BlendSpace, BlendSpaceDoc};
 use crate::engine::animation::components::SkeletonInstance;
 use crate::engine::animation::graph::{
     evaluate_pose, AnimAssetLoader, AnimGraphPlan, AnimMachine, AnimParamType, AnimParams,
-    ClipSet, ParamDecl, ParamValue, PlanClip, PlanSpace, PlanState, PlanTree, PoseScratch,
-    PoseSource,
+    ClipSet, MachineSource, ParamDecl, ParamValue, PlanClip, PlanMachineRef, PlanSpace, PlanState,
+    PlanTree, PoseScratch, PoseSource,
 };
 
 /// Default share of the right-hand column the preview pane takes.
@@ -342,10 +342,13 @@ fn one_state_plan(doc: &BlendSpaceDoc, space: &BlendSpace) -> AnimGraphPlan {
             })),
             speed: 1.0,
         }],
-        transitions: Vec::new(),
-        entry: 0,
-        slots: Vec::new(),
-        ik_chains: Vec::new(),
+        // One inline machine straight to Output — the pipeline the compiler
+        // would give a one-state document.
+        machines: vec![PlanMachineRef {
+            node_id: 0,
+            source: MachineSource::Inline,
+        }],
+        ..AnimGraphPlan::default()
     }
 }
 
