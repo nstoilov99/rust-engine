@@ -624,6 +624,21 @@ pub(super) fn float_prop(
     }
 }
 
+/// A clock-rate property (`speed`): absent = 1.0; a non-finite value refuses
+/// against `what`, because it would reach the clip sampler as a NaN time and
+/// panic its keyframe search.
+pub(super) fn speed_prop(
+    props: &std::collections::BTreeMap<String, PropValue>,
+    what: &str,
+) -> Result<f32, String> {
+    let speed = float_prop(props, SPEED_PROP).unwrap_or(1.0);
+    if speed.is_finite() {
+        Ok(speed)
+    } else {
+        Err(format!("{what}: `{SPEED_PROP}` is not a finite number"))
+    }
+}
+
 pub(super) fn str_prop<'a>(
     props: &'a std::collections::BTreeMap<String, PropValue>,
     key: &str,
@@ -953,11 +968,12 @@ fn compile_machine(
                 }))
             }
         };
+        let speed = speed_prop(&n.properties, &format!("state '{name}'"))?;
         states.push(PlanState {
             node_id: n.id,
             name,
             source,
-            speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
+            speed,
         });
     }
     if states.is_empty() {

@@ -3792,6 +3792,37 @@ fn ik_chains_compile_into_the_plan() {
     }
 }
 
+/// A non-finite clock rate would reach the sampler as a NaN time and panic
+/// its keyframe search: every `speed` (state, play-once slot, root clip)
+/// refuses at compile instead.
+#[test]
+fn non_finite_speeds_refuse_at_compile() {
+    let mut doc = ik_doc(&[]);
+    doc.nodes.pop(); // no IK chain needed
+    let state = doc.nodes.iter_mut().find(|n| n.id == 2).unwrap();
+    state
+        .properties
+        .insert(plan::SPEED_PROP.into(), PropValue::Float(f32::NAN));
+    let e = compile_anim_graph(&doc).unwrap_err();
+    assert!(e.contains("state 'Idle'") && e.contains("not a finite number"), "{e}");
+
+    let mut doc = ik_doc(&[]);
+    doc.nodes.pop();
+    doc.variables.push(trigger_decl("hit"));
+    doc.nodes.push(with(
+        7,
+        plan::ANIM_PLAY_ONCE_TYPE_ID,
+        Some("Hit"),
+        &[
+            (plan::CLIP_PROP, PropValue::Asset("anims/hit.anim".into())),
+            (plan::SLOT_TRIGGER_PROP, PropValue::Str("hit".into())),
+            (plan::SPEED_PROP, PropValue::Float(f32::INFINITY)),
+        ],
+    ));
+    let e = compile_anim_graph(&doc).unwrap_err();
+    assert!(e.contains("play-once slot 'Hit'") && e.contains("not a finite number"), "{e}");
+}
+
 #[test]
 fn ik_chains_refuse_bad_configs_with_anchored_messages() {
     let err = |props: &[(&str, PropValue)]| compile_anim_graph(&ik_doc(props)).unwrap_err();

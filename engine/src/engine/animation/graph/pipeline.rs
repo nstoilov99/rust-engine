@@ -24,7 +24,7 @@ use std::sync::Arc;
 use node_graph_types::{Edge, GraphDoc, NodeInst, PropValue};
 
 use super::plan::{
-    compile_doc, float_prop, str_prop, AnchoredWarning, AnimGraphLoader, AnimGraphPlan,
+    compile_doc, float_prop, speed_prop, str_prop, AnchoredWarning, AnimGraphLoader, AnimGraphPlan,
     AnimParamType, ParamDecl, PlanClip, PlanFootPlacement, PlanIkChain, PlanIkSolver, PlanSlot,
     PlanState, PoseSource, ANIM_ANY_STATE_TYPE_ID, ANIM_CLIP_TYPE_ID, ANIM_ENTRY_TYPE_ID,
     ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
@@ -32,7 +32,6 @@ use super::plan::{
     IK_AXIS_X_PROP, IK_AXIS_Y_PROP, IK_AXIS_Z_PROP, IK_BONES_PROP, IK_FOOT_PROP,
     IK_MAX_ANGLE_PROP, IK_PELVIS_PROP, IK_SOLVER_LOOK_AT, IK_SOLVER_PROP, IK_SOLVER_TWO_BONE,
     IK_WEIGHT_PARAM_PROP, POSE_PIN, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP, SLOT_TRIGGER_PROP,
-    SPEED_PROP,
 };
 
 // ---------------------------------------------------------------------------
@@ -382,6 +381,7 @@ pub(super) fn compile_slots(doc: &GraphDoc, parameters: &[ParamDecl]) -> Result<
             }
             Some(_) => {}
         }
+        let speed = speed_prop(&n.properties, &format!("play-once slot '{name}'"))?;
         slots.push(PlanSlot {
             node_id: n.id,
             name,
@@ -392,7 +392,7 @@ pub(super) fn compile_slots(doc: &GraphDoc, parameters: &[ParamDecl]) -> Result<
                     .map(str::to_string),
             },
             trigger,
-            speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
+            speed,
             fade_in: float_prop(&n.properties, SLOT_FADE_IN_PROP)
                 .unwrap_or(0.0)
                 .max(0.0),
@@ -1188,7 +1188,7 @@ impl<'a> PipeCx<'a> {
                             .filter(|s| !s.is_empty())
                             .map(str::to_string),
                     },
-                    speed: float_prop(&n.properties, SPEED_PROP).unwrap_or(1.0),
+                    speed: speed_prop(&n.properties, &format!("clip '{name}'"))?,
                     node_id: id,
                 });
                 Ok(PlanPose::Clip(self.root_clips.len() - 1))

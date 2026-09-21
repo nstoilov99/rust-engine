@@ -5068,12 +5068,17 @@ impl GraphEditorState {
         const PAD: f32 = 24.0;
         const NODE_EXT: [f32; 2] = [168.0, 100.0];
         let mut edits = Vec::new();
+        // The two canvases share a coordinate space, so a refit must see
+        // only its own canvas: groups of the showing family, fitted around
+        // the nodes of the showing family. Otherwise laying out one canvas
+        // resizes the other's groups around unrelated nodes.
         for (i, g) in self.doc.groups.iter().enumerate() {
+            if !self.group_visible(g) {
+                continue;
+            }
             let members = nodes_captured_by_rect(
                 &self
-                    .doc
-                    .nodes
-                    .iter()
+                    .visible_nodes()
                     .map(|n| {
                         (
                             n.id,
@@ -9606,11 +9611,11 @@ mod scope_tests {
     use super::*;
     use crate::engine::animation::graph::plan::{
         ANIM_CLIP_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
-        ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, GRAPH_PROP,
+        ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, GRAPH_PROP, POSE_PIN,
     };
     use crate::engine::animation::graph::{
         anim_node_registry, ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID,
-        ANIM_PIPE_OUTPUT_TYPE_ID, FAMILY_PIPELINE,
+        ANIM_PIPE_OUTPUT_TYPE_ID, FAMILY_PIPELINE, PIPE_IN_PIN,
     };
 
     fn node(id: u64, type_id: &str) -> NodeInst {
@@ -9661,6 +9666,46 @@ mod scope_tests {
         let listing = st.palette_registry().unwrap();
         assert!(listing.get(ANIM_PIPE_OUTPUT_TYPE_ID).is_some());
         assert!(listing.get(ANIM_STATE_TYPE_ID).is_none());
+    }
+
+    /// The two canvases share a coordinate space: laying out one must not
+    /// re-fit the other's groups around its nodes.
+    #[test]
+    fn auto_layout_refits_only_the_showing_canvas_groups() {
+        use super::super::graph_layout::LayoutSpacing;
+        let reg = anim_node_registry();
+        let mut st = two_canvases();
+        // Pipeline nodes far right, machine nodes at the origin.
+        for n in st.doc.nodes.iter_mut() {
+            n.position = match n.id {
+                0 => [1000.0, 0.0],
+                1 => [1300.0, 0.0],
+                2 => [0.0, 0.0],
+                _ => [200.0, 0.0],
+            };
+        }
+        st.doc.edges = vec![
+            Edge { from_node: 0, from_pin: POSE_PIN.into(), to_node: 1, to_pin: PIPE_IN_PIN.into() },
+        ];
+        // A machine-family group around the machine nodes, untagged (= machine).
+        st.doc.groups.push(GroupBox {
+            rect: [-20.0, -20.0, 400.0, 140.0],
+            title: "machine".into(),
+            ..Default::default()
+        });
+        let machine_rect = st.doc.groups[0].rect;
+        let rects: Vec<(u64, [f32; 4])> = st
+            .doc
+            .nodes
+            .iter()
+            .map(|n| (n.id, [n.position[0], n.position[1], 100.0, 40.0]))
+            .collect();
+
+        // Laying out the pipeline canvas moves SM/Output onto the machine
+        // group's coordinates; the machine group must not follow them.
+        assert_eq!(st.scope, CanvasScope::Pipeline);
+        st.auto_layout(&rects, LayoutSpacing::default(), &reg);
+        assert_eq!(st.doc.groups[0].rect, machine_rect, "hidden canvas group untouched");
     }
 
     #[test]
