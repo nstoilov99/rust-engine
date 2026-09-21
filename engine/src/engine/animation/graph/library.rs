@@ -32,7 +32,7 @@ use node_graph_types::{Edge, GraphDoc, GraphRealm, NodeInst, NodeRealm, PinType}
 
 use super::pipeline::{
     ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID, LAYER_BASE_PIN,
-    LAYER_LAYER_PIN, PIPE_IN_PIN,
+    LAYER_LAYER_PIN, PIPELINE_ROW_STEP, PIPE_IN_PIN,
 };
 use super::plan::{
     ANIM_CLIP_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID,
@@ -281,10 +281,13 @@ pub fn anim_rule_registry() -> NodeRegistry {
 }
 
 /// The document a fresh `.animgraph` starts as: Client realm (the compiler's
-/// authority requirement), an ENTRY already wired to an `Idle` state — the
+/// authority requirement), an inline State Machine wired to Output Pose on
+/// the pipeline canvas (the upgrade row's layout, [`PIPELINE_ROW_STEP`]
+/// apart) and, inside it, an ENTRY already wired to an `Idle` state — the
 /// same "teach the shape by seeding it" a fresh script graph gets from its
-/// event + sink pair. The state names no clip yet, so the first thing the
-/// author sees is the one anchored error that tells them what to do next.
+/// event + sink pair. Already v4-shaped, so opening it neither upgrades nor
+/// dirties. The state names no clip yet, so the first thing the author sees
+/// is the one anchored error that tells them what to do next.
 pub fn new_animgraph_doc() -> GraphDoc {
     let node = |id: u64, type_id: &str, title: Option<&str>, position: [f32; 2]| NodeInst {
         id,
@@ -301,13 +304,23 @@ pub fn new_animgraph_doc() -> GraphDoc {
         nodes: vec![
             node(0, ANIM_ENTRY_TYPE_ID, None, [-220.0, 40.0]),
             node(1, ANIM_STATE_TYPE_ID, Some("Idle"), [60.0, 40.0]),
+            node(2, ANIM_PIPE_MACHINE_TYPE_ID, None, [0.0, 0.0]),
+            node(3, ANIM_PIPE_OUTPUT_TYPE_ID, None, [PIPELINE_ROW_STEP, 0.0]),
         ],
-        edges: vec![Edge {
-            from_node: 0,
-            from_pin: STATE_OUT_PIN.to_string(),
-            to_node: 1,
-            to_pin: STATE_IN_PIN.to_string(),
-        }],
+        edges: vec![
+            Edge {
+                from_node: 0,
+                from_pin: STATE_OUT_PIN.to_string(),
+                to_node: 1,
+                to_pin: STATE_IN_PIN.to_string(),
+            },
+            Edge {
+                from_node: 2,
+                from_pin: POSE_PIN.to_string(),
+                to_node: 3,
+                to_pin: PIPE_IN_PIN.to_string(),
+            },
+        ],
         ..GraphDoc::default()
     }
 }
@@ -429,5 +442,32 @@ mod tests {
         let err = compile_anim_graph(&doc).unwrap_err();
         assert!(err.contains("state 'Idle'"), "{err}");
         assert!(err.contains("clip"), "{err}");
+    }
+
+    /// The template is v4-shaped (Task 41.7 D6): SM → Output already on the
+    /// pipeline row, so opening it upgrades nothing, and once the seeded
+    /// state names a clip it compiles clean — no warnings, the inline
+    /// machine as the root.
+    #[test]
+    fn a_fresh_animgraph_is_already_a_pipeline_root_and_compiles_without_warnings() {
+        use super::super::pipeline::{needs_pipeline_root, upgrade_pipeline_root};
+        use super::super::plan::{PlanPose, CLIP_PROP};
+        use node_graph_types::PropValue;
+        let mut doc = new_animgraph_doc();
+        assert!(!needs_pipeline_root(&doc));
+        assert!(!upgrade_pipeline_root(&mut doc), "nothing to upgrade");
+        assert_eq!(doc.version, node_graph_types::GRAPH_DOC_VERSION);
+        let sm = doc.nodes.iter().find(|n| n.type_id == ANIM_PIPE_MACHINE_TYPE_ID).unwrap();
+        let out = doc.nodes.iter().find(|n| n.type_id == ANIM_PIPE_OUTPUT_TYPE_ID).unwrap();
+        assert_eq!(sm.position, [0.0, 0.0]);
+        assert_eq!(out.position, [PIPELINE_ROW_STEP, 0.0]);
+        doc.node_mut(1)
+            .unwrap()
+            .properties
+            .insert(CLIP_PROP.to_string(), PropValue::Asset("anims/idle.anim".into()));
+        let compiled = compile_anim_graph(&doc).expect("the seeded document compiles");
+        assert!(compiled.warnings.is_empty(), "{:?}", compiled.warnings);
+        assert_eq!(compiled.plan.pipeline.root, PlanPose::Machine(0));
+        assert_eq!(compiled.plan.machines.len(), 1);
     }
 }

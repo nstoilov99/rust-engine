@@ -1519,6 +1519,11 @@ pub struct GraphEditorState {
     /// The *other* scope's pan/zoom, remembered across switches. `None` =
     /// never visited: the first switch frames that canvas's content.
     pub scope_view: Option<CanvasView>,
+    /// Play Once / IK Chain node id → 1-based applied order from the last
+    /// *successful* compile (Task 41.7 D6 header chips). A node the pipeline
+    /// walk did not reach is absent. Kept across a refusal, so the chips do
+    /// not flicker while an edit is mid-way.
+    pub applied_order: BTreeMap<u64, usize>,
 }
 
 /// A live drag on the rule peek panel (Task 41 polish): moving it by its
@@ -1584,30 +1589,49 @@ impl GraphDomain {
         )
     }
 
-    /// This domain's compile refusals for `doc`, anchored. Scripts answer
-    /// none: their compile errors surface through the interpreter's own path.
-    /// `path` is the document's content-relative key — it seeds the nested
-    /// compiler's cycle guard, and nested `.animgraph` references resolve
-    /// from the content root on disk (the saved file is the unit of truth
-    /// here, exactly as it is for the runtime's plan cache — a dirty child
-    /// tab shows in the host once it saves).
-    pub fn compile_errors(self, doc: &GraphDoc, path: &str) -> Vec<DomainError> {
+    /// This domain's compile refusals for `doc`, anchored — plus what a
+    /// *successful* animation compile says about the pipeline (Task 41.7
+    /// D6): the compiler's anchored warnings, and the applied order of every
+    /// reachable Play Once / IK Chain node for the header chips. Scripts
+    /// answer nothing: their compile errors surface through the
+    /// interpreter's own path. `path` is the document's content-relative
+    /// key — it seeds the nested compiler's cycle guard, and nested
+    /// `.animgraph` references resolve from the content root on disk (the
+    /// saved file is the unit of truth here, exactly as it is for the
+    /// runtime's plan cache — a dirty child tab shows in the host once it
+    /// saves).
+    pub fn compile_report(self, doc: &GraphDoc, path: &str) -> DomainReport {
         match self {
-            GraphDomain::Script => Vec::new(),
+            GraphDomain::Script => DomainReport::default(),
             GraphDomain::Animation => {
                 // Nested graphs and blend spaces both resolve from disk.
                 let load = crate::engine::animation::graph::DiskAnimAssets {
                     content_root: std::path::PathBuf::from("content"),
                 };
                 match crate::engine::animation::graph::compile_anim_graph_with(doc, path, &load) {
-                    Ok(_) => Vec::new(),
+                    Ok(compiled) => DomainReport {
+                        errors: compiled
+                            .warnings
+                            .iter()
+                            .map(|w| DomainError {
+                                node: Some(w.node_id),
+                                region_node: None,
+                                message: w.message.clone(),
+                                warning: true,
+                            })
+                            .collect(),
+                        applied_order: Some(applied_order(doc, &compiled.plan)),
+                    },
                     Err(message) => {
                         let node = anchor_anim_refusal(doc, &message);
                         // A refusal naming a node inside the transition's
                         // rule ("rule node 3") carries the region-local id
                         // too, so F8 can descend into the peek.
                         let region_node = anchor_rule_refusal(&message);
-                        vec![DomainError { node, region_node, message }]
+                        DomainReport {
+                            errors: vec![DomainError { node, region_node, message, warning: false }],
+                            applied_order: None,
+                        }
                     }
                 }
             }
@@ -1628,15 +1652,72 @@ impl GraphDomain {
                     compile_rule_region(&region, owner, &params).map(|_| ())
                 };
                 match compile() {
-                    Ok(()) => Vec::new(),
+                    Ok(()) => DomainReport::default(),
                     Err(message) => {
                         let node = anchor_rule_refusal(&message);
-                        vec![DomainError { node, region_node: None, message }]
+                        DomainReport {
+                            errors: vec![DomainError { node, region_node: None, message, warning: false }],
+                            applied_order: None,
+                        }
                     }
                 }
             }
         }
     }
+}
+
+/// What one domain compile told the editor (Task 41.7 D6).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DomainReport {
+    /// Refusals (at most one — the compiler stops at the first) or, after a
+    /// successful compile, its anchored warnings.
+    pub errors: Vec<DomainError>,
+    /// Play Once / IK Chain node id → 1-based applied order, for every node
+    /// the pipeline walk reached. `None` when the compile refused: the
+    /// chips keep showing the last successful compile's order.
+    pub applied_order: Option<BTreeMap<u64, usize>>,
+}
+
+/// The header-chip numbers: where each of this document's own Play Once
+/// slots and IK chains sits in the plan's applied order (`slot_order` /
+/// `ik_order`, 1-based). Host slots are the plan's first `N` (lifted ones
+/// follow), so a lifted slot whose child-document id collides with a host
+/// node's never claims the host's chip; lifted chains are matched out by
+/// name (a chain's name is its title, else `IK <id>` — the compiler's own
+/// reading). Unreachable nodes are absent from both orders and get no chip.
+fn applied_order(
+    doc: &GraphDoc,
+    plan: &crate::engine::animation::graph::plan::AnimGraphPlan,
+) -> BTreeMap<u64, usize> {
+    use crate::engine::animation::graph::plan::{ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID};
+    let mut out = BTreeMap::new();
+    let host_slots = doc
+        .nodes
+        .iter()
+        .filter(|n| n.type_id == ANIM_PLAY_ONCE_TYPE_ID)
+        .count();
+    for (k, i) in plan.pipeline.slot_order.iter().enumerate() {
+        if *i < host_slots {
+            if let Some(s) = plan.slots.get(*i) {
+                out.insert(s.node_id, k + 1);
+            }
+        }
+    }
+    for (k, i) in plan.pipeline.ik_order.iter().enumerate() {
+        let Some(c) = plan.ik_chains.get(*i) else { continue };
+        let is_host = doc.node(c.node_id).is_some_and(|n| {
+            n.type_id == ANIM_IK_CHAIN_TYPE_ID
+                && n.title
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .map_or_else(|| format!("IK {}", n.id), str::to_string)
+                    == c.name
+        });
+        if is_host {
+            out.insert(c.node_id, k + 1);
+        }
+    }
+    out
 }
 
 /// Which of an animation document's two canvases a tab shows (Task 41.7 D6).
@@ -1710,6 +1791,10 @@ pub struct DomainError {
     /// the rule peek on `node` and flashes this node in it (ticket 05).
     pub region_node: Option<u64>,
     pub message: String,
+    /// A compiler *warning* (Task 41.7 D6: an unreachable pipeline node, a
+    /// nested document's lifted slots/chains): same anchoring, same F8
+    /// cycle, drawn dimmed in the warning tone and never a refusal.
+    pub warning: bool,
 }
 
 /// Resolve which node an animation-compiler refusal is about, from the
@@ -1749,7 +1834,17 @@ pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
         return named(ANIM_STATE_TYPE_ID, "State", name);
     }
     if let Some(name) = quoted("play-once slot ") {
-        return named(ANIM_PLAY_ONCE_TYPE_ID, "Slot", name);
+        // The arm-time form carries the id too (`play-once slot 'X' (#4):
+        // bone …`), which beats a name two slots may share.
+        let tagged = msg
+            .split("' (#")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next()?.parse::<u64>().ok())
+            .filter(|id| doc.node(*id).is_some_and(|n| n.type_id == ANIM_PLAY_ONCE_TYPE_ID));
+        return tagged.or_else(|| named(ANIM_PLAY_ONCE_TYPE_ID, "Slot", name));
+    }
+    if let Some(id) = anchor_pipeline_refusal(doc, msg) {
+        return Some(id);
     }
     // An alias's compiler name is its title, else the bare "Alias" (no id) —
     // not unique, so among the aliases so named prefer the one the message
@@ -1778,6 +1873,116 @@ pub fn anchor_anim_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
         if let (Some(e), None) = (entries.next(), entries.next()) {
             return Some(e.id);
         }
+    }
+    None
+}
+
+/// The pipeline family's half of the anchoring contract (Task 41.7 D6): the
+/// compiler names a pipeline node the way `pipeline::display_name` does —
+/// title, else `State Machine` / `Output Pose` / `Clip <id>` / `Layer <id>`
+/// / `Slot <id>` / `IK <id>` — and prefixes it with the kind word. Covers
+/// compile refusals and warnings (`<kind> '<name>' …`), the runtime's
+/// arm-time mask refusals (`layer #<id>: bone …`), IK chain arm refusals
+/// (`IK chain '<name>': bone …`), the node-less shapes that still point at
+/// one node (the Output Pose / inline State Machine wiring family), and the
+/// wire-hygiene shapes that quote a node without a kind word.
+fn anchor_pipeline_refusal(doc: &GraphDoc, msg: &str) -> Option<u64> {
+    use crate::engine::animation::graph::plan::{
+        ANIM_CLIP_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID, GRAPH_PROP,
+    };
+    use crate::engine::animation::graph::{
+        ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID,
+    };
+    let display_name = |n: &NodeInst| -> Option<String> {
+        if let Some(t) = n.title.as_deref().filter(|t| !t.trim().is_empty()) {
+            return Some(t.to_string());
+        }
+        Some(match n.type_id.as_str() {
+            ANIM_PIPE_MACHINE_TYPE_ID => "State Machine".to_string(),
+            ANIM_PIPE_OUTPUT_TYPE_ID => "Output Pose".to_string(),
+            ANIM_CLIP_TYPE_ID => format!("Clip {}", n.id),
+            ANIM_PIPE_LAYER_TYPE_ID => format!("Layer {}", n.id),
+            ANIM_PLAY_ONCE_TYPE_ID => format!("Slot {}", n.id),
+            ANIM_IK_CHAIN_TYPE_ID => format!("IK {}", n.id),
+            // The wire-hygiene label for a non-pipeline node.
+            _ => format!("node {}", n.id),
+        })
+    };
+    let named = |type_id: Option<&str>, name: &str| -> Option<u64> {
+        doc.nodes
+            .iter()
+            .filter(|n| type_id.map_or(true, |t| n.type_id == t))
+            .find(|n| display_name(n).as_deref() == Some(name))
+            .map(|n| n.id)
+    };
+    let quoted = |prefix: &str| -> Option<&str> {
+        let rest = msg.strip_prefix(prefix)?.strip_prefix('\'')?;
+        rest.split('\'').next()
+    };
+    let digits = |rest: &str| -> Option<u64> {
+        let d: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        d.parse().ok()
+    };
+    let only = |pred: &dyn Fn(&NodeInst) -> bool| -> Option<u64> {
+        let mut it = doc.nodes.iter().filter(|n| pred(n));
+        match (it.next(), it.next()) {
+            (Some(n), None) => Some(n.id),
+            _ => None,
+        }
+    };
+
+    for (prefix, type_id) in [
+        ("state machine ", ANIM_PIPE_MACHINE_TYPE_ID),
+        ("clip ", ANIM_CLIP_TYPE_ID),
+        ("layer ", ANIM_PIPE_LAYER_TYPE_ID),
+        ("IK chain ", ANIM_IK_CHAIN_TYPE_ID),
+        ("Output Pose ", ANIM_PIPE_OUTPUT_TYPE_ID),
+    ] {
+        if let Some(name) = quoted(prefix) {
+            return named(Some(type_id), name);
+        }
+    }
+    // Arm-time mask refusal: `layer #<id>: bone 'Y' is not in the skeleton`.
+    if let Some(id) = msg.strip_prefix("layer #").and_then(digits) {
+        return doc
+            .node(id)
+            .is_some_and(|n| n.type_id == ANIM_PIPE_LAYER_TYPE_ID)
+            .then_some(id);
+    }
+    // A quoted node with no kind word: the loop / ordering / cross-family
+    // shapes name any pipeline node (or, for a crossing wire, its consumer).
+    if let Some(name) = quoted("the pipeline loops through ") {
+        return named(None, name);
+    }
+    if let Some(name) = msg.strip_prefix('\'').and_then(|r| r.split('\'').next()) {
+        if msg.contains("must come before the first IK Chain") {
+            return named(None, name);
+        }
+    }
+    if msg.starts_with("the wire from '") && msg.contains("' crosses from the ") {
+        let name = msg.split("' into '").nth(1)?.split('\'').next()?;
+        return named(None, name);
+    }
+    // `node <id> ('type') is not a pipeline node` / `a pipeline wire names
+    // node <id>, which does not exist`.
+    if let Some(id) = msg.split("node ").nth(1).and_then(digits) {
+        if msg.contains("is not a pipeline node") || msg.contains("a pipeline wire names node ") {
+            return doc.node(id).map(|n| n.id);
+        }
+    }
+    // The wiring family anchors on the one node it is about when there is
+    // exactly one — the "needs" / "at most one" shapes leave it unanchored.
+    if msg.contains("Output Pose node") {
+        return only(&|n| n.type_id == ANIM_PIPE_OUTPUT_TYPE_ID);
+    }
+    if msg.contains("inline State Machine node") {
+        return only(&|n| {
+            n.type_id == ANIM_PIPE_MACHINE_TYPE_ID
+                && !matches!(
+                    n.properties.get(GRAPH_PROP),
+                    Some(PropValue::Asset(s)) | Some(PropValue::Str(s)) if !s.trim().is_empty()
+                )
+        });
     }
     None
 }
@@ -2887,13 +3092,14 @@ impl GraphEditorState {
         registry: &NodeRegistry,
     ) -> Self {
         let errors = validate_doc(&doc, registry);
-        let domain_errors = domain.compile_errors(&doc, &path);
+        let report = domain.compile_report(&doc, &path);
         Self {
             path,
             doc,
             errors,
             domain,
-            domain_errors,
+            domain_errors: report.errors,
+            applied_order: report.applied_order.unwrap_or_default(),
             ref_errors: Vec::new(),
             dirty: false,
             migrated: false,
@@ -2991,7 +3197,11 @@ impl GraphEditorState {
     /// Recompute the domain-compiler refusals alone — what a host tab needs
     /// when a graph it *nests* changed on disk without any edit of its own.
     pub fn refresh_domain_errors(&mut self) {
-        self.domain_errors = self.domain.compile_errors(&self.doc, &self.path);
+        let report = self.domain.compile_report(&self.doc, &self.path);
+        self.domain_errors = report.errors;
+        if let Some(order) = report.applied_order {
+            self.applied_order = order;
+        }
         self.revision += 1;
     }
 
@@ -9615,5 +9825,218 @@ mod scope_tests {
         assert!(st.comment_visible(&st.doc.comments[0]));
         assert!(!st.set_scope(CanvasScope::Machine, &reg), "scopes are an animation thing");
         assert!(!st.is_machine_scope());
+    }
+}
+
+/// Pipeline authoring diagnostics (Task 41.7 D6, P5): every pipeline
+/// refusal / warning shape anchors to its node, warnings arrive flagged
+/// through the real error path, chips read the applied order, and the
+/// template opens as a pipeline root.
+#[cfg(test)]
+mod pipeline_diagnostics_tests {
+    use super::*;
+    use crate::engine::animation::graph::plan::{
+        ANIM_CLIP_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID,
+        ANIM_STATE_TYPE_ID, CLIP_PROP, GRAPH_PROP, IK_BONES_PROP, IK_WEIGHT_PARAM_PROP,
+        POSE_PIN, SLOT_TRIGGER_PROP, STATE_IN_PIN, STATE_OUT_PIN,
+    };
+    use crate::engine::animation::graph::{
+        new_animgraph_doc, trigger_pin_type, ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID,
+        ANIM_PIPE_OUTPUT_TYPE_ID, PIPE_IN_PIN,
+    };
+    use crate::engine::node_graph::GraphRealm;
+
+    fn node(id: u64, type_id: &str, title: Option<&str>) -> NodeInst {
+        NodeInst {
+            id,
+            type_id: type_id.to_string(),
+            type_version: 1,
+            position: [id as f32 * 10.0, 0.0],
+            properties: Default::default(),
+            subgraph: None,
+            tint: None,
+            title: title.map(str::to_string),
+        }
+    }
+
+    fn edge(from: u64, from_pin: &str, to: u64, to_pin: &str) -> Edge {
+        Edge {
+            from_node: from,
+            from_pin: from_pin.to_string(),
+            to_node: to,
+            to_pin: to_pin.to_string(),
+        }
+    }
+
+    /// Each pipeline message shape the compiler and the runtime's arm step
+    /// produce resolves to the node it is about — by kind word + display
+    /// name, by `#id`, or (the wiring family) by being the only such node.
+    #[test]
+    fn pipeline_refusals_and_warnings_anchor_to_their_node() {
+        let mut doc = GraphDoc::default();
+        doc.nodes = vec![
+            node(0, ANIM_PIPE_MACHINE_TYPE_ID, None), // "State Machine", inline
+            node(1, ANIM_PIPE_OUTPUT_TYPE_ID, None),  // "Output Pose"
+            node(2, ANIM_CLIP_TYPE_ID, None),         // "Clip 2"
+            node(3, ANIM_PIPE_LAYER_TYPE_ID, Some("Upper")),
+            node(4, ANIM_IK_CHAIN_TYPE_ID, Some("Left Foot")),
+            node(5, ANIM_IK_CHAIN_TYPE_ID, None), // "IK 5"
+            node(6, ANIM_PLAY_ONCE_TYPE_ID, Some("Cast")),
+            node(7, ANIM_PLAY_ONCE_TYPE_ID, Some("Cast")), // a namesake
+            node(8, ANIM_PIPE_MACHINE_TYPE_ID, Some("Nested")),
+            node(9, ANIM_STATE_TYPE_ID, Some("Idle")),
+        ];
+        doc.node_mut(8)
+            .unwrap()
+            .properties
+            .insert(GRAPH_PROP.into(), PropValue::Asset("graphs/child.animgraph".into()));
+        let a = |msg: &str| anchor_anim_refusal(&doc, msg);
+
+        // Kind word + display name: compile refusals and warnings.
+        assert_eq!(a("state machine 'Nested': nested graph 'graphs/child.animgraph' could not be loaded"), Some(8));
+        assert_eq!(a("state machine 'Nested' nests 'graphs/child.animgraph': its IK chain Foot apply after this document's own"), Some(8));
+        assert_eq!(a("state machine 'State Machine': input 'x' is not wired"), Some(0));
+        assert_eq!(a("clip 'Clip 2' names no clip (property `clip`)"), Some(2));
+        assert_eq!(a("clip 'Clip 2' is not connected to Output Pose and is ignored"), Some(2));
+        assert_eq!(a("layer 'Upper' names no bones (property `bones`: comma-separated mask roots)"), Some(3));
+        assert_eq!(a("layer 'Upper': parameter 'aim' is not declared"), Some(3));
+        assert_eq!(a("layer 'Upper' feeds 2 nodes \u{2014} a pose can be wired to one input only (fan-out is not supported)"), Some(3));
+        assert_eq!(a("IK chain 'Left Foot' names no bones (property `bones`: comma-separated bone names, root\u{2192}tip)"), Some(4));
+        assert_eq!(a("IK chain 'IK 5': the two-bone solver takes exactly 3 bones (root, mid, tip), got 2"), Some(5));
+        assert_eq!(a("Output Pose 'Output Pose' has no input 'pose'"), Some(1));
+        assert_eq!(a("play-once slot 'Cast' is not connected to Output Pose and is ignored"), Some(6), "first by name");
+
+        // Arm-time refusals (the runtime's / preview's exact text).
+        assert_eq!(a("IK chain 'Left Foot': bone 'mixamorig:LeftFoot' is not in the skeleton"), Some(4));
+        assert_eq!(a("IK chain 'Left Foot': pelvis bone 'Hips' is not in the skeleton"), Some(4));
+        assert_eq!(a("layer #3: bone 'mixamorig:Spine' is not in the skeleton"), Some(3));
+        assert_eq!(a("layer #2: bone 'x' is not in the skeleton"), None, "2 is a clip");
+        assert_eq!(a("play-once slot 'Cast' (#7): bone 'Hand' is not in the skeleton"), Some(7), "the #id beats the namesake");
+
+        // Quoted without a kind word.
+        assert_eq!(a("the pipeline loops through 'Upper'"), Some(3));
+        assert_eq!(a("'Upper' must come before the first IK Chain \u{2014} IK works in model space"), Some(3));
+        assert_eq!(a("the wire from 'Idle' into 'Clip 2' crosses from the state machine into the pipeline"), Some(2));
+        assert_eq!(a("the wire from 'Upper' into 'Idle' crosses from the pipeline into the state machine"), Some(9));
+        assert_eq!(a("node 5 ('anim_ik_chain') is not a pipeline node"), Some(5));
+        assert_eq!(a("a pipeline wire names node 42, which does not exist"), None);
+
+        // The wiring family: the one node it can mean.
+        assert_eq!(a("the Output Pose node has nothing wired in"), Some(1));
+        assert_eq!(a("the inline State Machine node is not wired to Output Pose"), Some(0));
+        doc.nodes.push(node(10, ANIM_PIPE_OUTPUT_TYPE_ID, None));
+        let a = |msg: &str| anchor_anim_refusal(&doc, msg);
+        assert_eq!(a("an animation graph has exactly one Output Pose node (found 2)"), None, "two: nothing to point at");
+        assert_eq!(a("state machine 'Nobody': x"), None);
+    }
+
+    /// A pipeline that compiles: SM → Cast (slot) → Foot (IK) → Output, a
+    /// stray Clip. Variables: `attack` (Trigger), `w` (Float).
+    fn compiled_pipeline() -> GraphEditorState {
+        let mut st = test_state("graphs/p5.animgraph");
+        st.doc.realm = GraphRealm::Client;
+        let mut cast = node(1, ANIM_PLAY_ONCE_TYPE_ID, Some("Cast"));
+        cast.properties.insert(CLIP_PROP.into(), PropValue::Asset("anims/cast.anim".into()));
+        cast.properties.insert(SLOT_TRIGGER_PROP.into(), PropValue::Str("attack".into()));
+        let mut foot = node(2, ANIM_IK_CHAIN_TYPE_ID, Some("Foot"));
+        foot.properties.insert(IK_BONES_PROP.into(), PropValue::Str("a, b, c".into()));
+        foot.properties.insert(IK_WEIGHT_PARAM_PROP.into(), PropValue::Str("w".into()));
+        let mut idle = node(6, ANIM_STATE_TYPE_ID, Some("Idle"));
+        idle.properties.insert(CLIP_PROP.into(), PropValue::Asset("anims/idle.anim".into()));
+        st.doc.nodes = vec![
+            node(0, ANIM_PIPE_MACHINE_TYPE_ID, None),
+            cast,
+            foot,
+            node(3, ANIM_PIPE_OUTPUT_TYPE_ID, None),
+            node(4, ANIM_CLIP_TYPE_ID, None),
+            node(5, ANIM_ENTRY_TYPE_ID, None),
+            idle,
+        ];
+        st.doc.edges = vec![
+            edge(0, POSE_PIN, 1, PIPE_IN_PIN),
+            edge(1, POSE_PIN, 2, PIPE_IN_PIN),
+            edge(2, POSE_PIN, 3, PIPE_IN_PIN),
+            edge(5, STATE_OUT_PIN, 6, STATE_IN_PIN),
+        ];
+        st.doc.variables = vec![
+            VarDecl {
+                slug: "attack".into(),
+                label: "Attack".into(),
+                ty: trigger_pin_type(),
+                default: None,
+                group: None,
+            },
+            VarDecl {
+                slug: "w".into(),
+                label: "W".into(),
+                ty: PinType::Float,
+                default: Some(PropValue::Float(1.0)),
+                group: None,
+            },
+        ];
+        st.after_edit(&NodeRegistry::new());
+        st
+    }
+
+    /// A successful compile delivers its warnings flagged and anchored, and
+    /// the applied order of every reachable slot / chain for the chips; a
+    /// refusal keeps the last order. F8 onto a warning on the other canvas
+    /// switches scope (the `reveal` hook `cycle_error` calls).
+    #[test]
+    fn warnings_anchor_and_chips_read_the_applied_order() {
+        let reg = NodeRegistry::new();
+        let mut st = compiled_pipeline();
+        assert_eq!(st.domain_errors.len(), 1, "{:?}", st.domain_errors);
+        let w = &st.domain_errors[0];
+        assert!(w.warning);
+        assert_eq!(w.node, Some(4), "anchored on the stray clip");
+        assert!(w.message.contains("is not connected to Output Pose"), "{}", w.message);
+        assert_eq!(st.applied_order.get(&1), Some(&1), "the one slot is #1");
+        assert_eq!(st.applied_order.get(&2), Some(&1), "the one chain is #1");
+        assert_eq!(st.applied_order.len(), 2);
+
+        // The warning sits on the pipeline canvas: from the machine, F8's
+        // reveal switches back and says so.
+        st.enter_machine_scope(&reg);
+        assert!(st.reveal(4, &reg));
+        assert!(st.is_pipeline_scope());
+
+        // Break the compile: one refusal, no warning, the order kept.
+        st.doc.node_mut(6).unwrap().properties.remove(CLIP_PROP);
+        st.after_edit(&reg);
+        assert_eq!(st.domain_errors.len(), 1);
+        assert!(!st.domain_errors[0].warning);
+        assert_eq!(st.applied_order.len(), 2, "the last successful order survives a refusal");
+
+        // Unwire the chain: it no longer takes part, so it loses its chip.
+        st.doc.node_mut(6).unwrap().properties.insert(
+            CLIP_PROP.into(),
+            PropValue::Asset("anims/idle.anim".into()),
+        );
+        st.doc.edges.retain(|e| e.to_node != 2 && e.from_node != 2);
+        st.doc.edges.push(edge(1, POSE_PIN, 3, PIPE_IN_PIN));
+        st.after_edit(&reg);
+        assert!(st.domain_errors.iter().all(|e| e.warning), "{:?}", st.domain_errors);
+        assert_eq!(st.applied_order.get(&1), Some(&1));
+        assert_eq!(st.applied_order.get(&2), None, "unreachable: no chip");
+    }
+
+    /// The template opens on the pipeline canvas, clean: no upgrade, no
+    /// dirty flag, its one refusal the seeded state's missing clip.
+    #[test]
+    fn the_template_opens_as_a_pipeline_root_without_upgrading() {
+        let st = GraphEditorState::from_doc(
+            "graphs/new.animgraph".into(),
+            new_animgraph_doc(),
+            GraphDomain::Animation,
+            &NodeRegistry::new(),
+        );
+        assert_eq!(st.scope, CanvasScope::Pipeline);
+        assert!(!st.dirty && !st.migrated);
+        assert!(st.is_inline_machine(2));
+        assert_eq!(st.visible_nodes().count(), 2, "SM and Output on the root");
+        assert_eq!(st.domain_errors.len(), 1);
+        assert_eq!(st.domain_errors[0].node, Some(1), "the clipless state");
+        assert!(!st.domain_errors[0].warning);
     }
 }

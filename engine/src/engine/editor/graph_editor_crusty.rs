@@ -206,6 +206,9 @@ const REROUTE_PIN_OFF: f32 = 0.30;
 const REROUTE_PIN_HIT: f32 = 0.40;
 /// Non-primary members of a multi-selection draw their outline at 55%.
 const SELECTION_REST_ALPHA: f32 = 0.55;
+/// Alpha of the warning tone on a node carrying only a compiler warning
+/// (Task 41.7 D6): the error chrome's shape, dimmed — advisory, not a stop.
+const WARN_DIM: f32 = 0.7;
 /// Hollow (unconnected) pin ring width, world units at ui_scale 1.0.
 const BASE_RING_W: f32 = 1.5;
 
@@ -348,6 +351,10 @@ impl IndexedError {
             IndexedError::Domain(_) => None,
         }
     }
+
+    fn is_warning(&self) -> bool {
+        matches!(self, IndexedError::Domain(e) if e.warning)
+    }
 }
 
 /// This frame's errors, resolved to the thing each one is *about*. Built once
@@ -358,6 +365,10 @@ impl IndexedError {
 struct ErrorIndex {
     /// Nodes carrying a border + gutter badge.
     nodes: BTreeSet<u64>,
+    /// Nodes carrying only a compiler *warning* (Task 41.7 D6): the same
+    /// border + badge in the warning tone, dimmed. An error on the node
+    /// outranks it.
+    warned: BTreeSet<u64>,
     /// Pins carrying an error ring, keyed `(node, slug, is_output)`.
     pins: BTreeSet<(u64, String, bool)>,
     /// Edges drawn in `status.error` with an x at their midpoint.
@@ -385,6 +396,9 @@ impl ErrorIndex {
             .chain(domain_errors.iter().cloned().map(IndexedError::Domain));
         for e in all {
             match e.anchor() {
+                ErrorAnchor::Node(id) if e.is_warning() => {
+                    ix.warned.insert(id);
+                }
                 ErrorAnchor::Node(id) => {
                     ix.nodes.insert(id);
                 }
@@ -413,6 +427,11 @@ impl ErrorIndex {
 
     fn is_empty(&self) -> bool {
         self.ordered.is_empty()
+    }
+
+    /// Nothing but warnings: the count chip wears the warning tone.
+    fn only_warnings(&self) -> bool {
+        self.ordered.iter().all(IndexedError::is_warning)
     }
 
     fn ghosts_for(&self, node: u64) -> &[(String, bool)] {
@@ -773,6 +792,30 @@ fn config_write_back(n: &NodeInst, slug: &str, v: PropValue) -> (String, PropVal
     (ALIAS_STATES_PROP.to_string(), alias_states_value(&ids))
 }
 
+/// The header chip a pipeline node wears in its tag slot (Task 41.7 D6):
+/// `SLOT #2` / `IK #1` is the node's 1-based place in the plan's applied
+/// `slot_order` / `ik_order` from the last successful compile — absent
+/// while the walk from Output Pose does not reach it — and `LAYER · 2 ROOTS`
+/// is the mask's root count. Every other node keeps its plain tag.
+fn pipeline_chip(state: &GraphEditorState, n: &NodeInst, tag: String) -> String {
+    use crate::engine::animation::graph::plan::{ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID};
+    use crate::engine::animation::graph::{ANIM_PIPE_LAYER_TYPE_ID, MASK_BONES_PROP};
+    match n.type_id.as_str() {
+        ANIM_PLAY_ONCE_TYPE_ID | ANIM_IK_CHAIN_TYPE_ID => match state.applied_order.get(&n.id) {
+            Some(k) => format!("{tag} #{k}"),
+            None => tag,
+        },
+        ANIM_PIPE_LAYER_TYPE_ID => {
+            let roots = match n.properties.get(MASK_BONES_PROP) {
+                Some(PropValue::Str(s)) => s.split(',').filter(|b| !b.trim().is_empty()).count(),
+                _ => 0,
+            };
+            format!("{tag} \u{b7} {roots} ROOT{}", if roots == 1 { "" } else { "S" })
+        }
+        _ => tag,
+    }
+}
+
 /// The reserved config rows a node instance shows, in render order.
 ///
 /// Sourced from the type's `NodeKind` plus the reserved-key constants, so
@@ -790,7 +833,10 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
         IK_WEIGHT_PARAM_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP,
         SLOT_TRIGGER_PROP, SPACE_PROP, SPEED_PROP,
     };
-    use crate::engine::animation::graph::ALIAS_GLOBAL_PROP;
+    use crate::engine::animation::graph::{
+        ALIAS_GLOBAL_PROP, ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID,
+        LAYER_INCLUDE_ROOT_PROP, LAYER_WEIGHT_PARAM_PROP, MASK_BONES_PROP,
+    };
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
         Some(PropValue::Enum(s)) => s.clone(),
@@ -998,6 +1044,55 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
                 "Fade Out".to_string(),
                 InlineKind::Float(float_of(SLOT_FADE_OUT_PROP, 0.0)),
             ));
+            // Mask roots (Task 41.7 D7): comma-separated; empty = whole body.
+            out.push((
+                MASK_BONES_PROP.to_string(),
+                "Bones".to_string(),
+                InlineKind::Str(text_of(MASK_BONES_PROP)),
+            ));
+        }
+        // A Layer (Task 41.7 D6): mask roots, the Float weight parameter as
+        // a dropdown (the IK weight row's shape), and whether the listed
+        // roots themselves are in the mask.
+        _ if n.type_id == ANIM_PIPE_LAYER_TYPE_ID => {
+            out.push((
+                MASK_BONES_PROP.to_string(),
+                "Bones".to_string(),
+                InlineKind::Str(text_of(MASK_BONES_PROP)),
+            ));
+            let value = text_of(LAYER_WEIGHT_PARAM_PROP);
+            let variants: Vec<String> = docd
+                .doc()
+                .variables
+                .iter()
+                .filter(|v| v.ty == PinType::Float)
+                .map(|v| v.slug.clone())
+                .collect();
+            let ok = variants.contains(&value);
+            out.push((
+                LAYER_WEIGHT_PARAM_PROP.to_string(),
+                "Weight".to_string(),
+                InlineKind::Choice { value, variants, ok },
+            ));
+            let include_root = !matches!(
+                n.properties.get(LAYER_INCLUDE_ROOT_PROP),
+                Some(PropValue::Bool(false))
+            );
+            out.push((
+                LAYER_INCLUDE_ROOT_PROP.to_string(),
+                "Include Root".to_string(),
+                InlineKind::Bool(include_root),
+            ));
+        }
+        // A State Machine node (Task 41.7 D6): the nested `.animgraph`, the
+        // state's Graph row one family over. Empty = the inline machine —
+        // the Details panel says so and offers the preview mesh there.
+        _ if n.type_id == ANIM_PIPE_MACHINE_TYPE_ID => {
+            out.push((
+                GRAPH_PROP.to_string(),
+                "Graph".to_string(),
+                InlineKind::Str(text_of(GRAPH_PROP)),
+            ));
         }
         // An IK Chain (Task 41.5 P5): bones as one comma-separated row
         // (root→tip), the solver enum, the fading Float parameter as a
@@ -1173,6 +1268,9 @@ struct NodeGeom {
     missing: bool,
     /// Carries a validation error: error border + one gutter badge.
     errored: bool,
+    /// Carries a compiler warning and no error (Task 41.7 D6): the same
+    /// border + badge, warning tone, dimmed.
+    warned: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
     /// An at-rest transition chip (Task 41): drawn instead of node anatomy.
@@ -1449,6 +1547,7 @@ fn build_geoms(
                     tint: n.tint,
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
+                    warned: errors.warned.contains(&n.id),
                     reroute: true,
                     chip: None,
                     anim: None,
@@ -1517,6 +1616,7 @@ fn build_geoms(
                     tint: n.tint,
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
+                    warned: errors.warned.contains(&n.id),
                     reroute: false,
                     chip: Some(ChipGeom { tip: resolved.tooltip(), dir: Vec2::new(1.0, 0.0) }),
                     anim: None,
@@ -1613,6 +1713,11 @@ fn build_geoms(
             let tag = crate::engine::animation::graph::anim_node_tag(&n.type_id)
                 .map(str::to_string)
                 .unwrap_or_else(|| derive_tag(is_sub, desc, category.as_deref()));
+            // Task 41.7 D6 header chips ride the tag slot — the applied
+            // order of a reachable Play Once / IK Chain, a Layer's root
+            // count — so they are sized with the header and follow the
+            // scope filter with the node.
+            let tag = pipeline_chip(state, n, tag);
 
             // Task 41 rework: machine nodes keep pins off the card even
             // unfolded — flow wires land on the border. A selected state
@@ -1924,6 +2029,7 @@ fn build_geoms(
                 tint: n.tint,
                 missing,
                 errored: errors.nodes.contains(&n.id),
+                warned: errors.warned.contains(&n.id),
                 reroute: is_reroute,
                 chip: None,
                 anim: None,
@@ -2022,6 +2128,7 @@ fn anim_card_geom(
     use crate::engine::animation::graph::plan::{STATE_IN_PIN, STATE_OUT_PIN};
     let min = Pos2::new(n.position[0], n.position[1]);
     let errored = errors.nodes.contains(&n.id);
+    let warned = errors.warned.contains(&n.id);
     let (title, tag, subtitle) = match kind {
         AnimCardKind::Entry => ("\u{25b6} ENTRY".to_string(), String::new(), None),
         AnimCardKind::Alias => (
@@ -2037,7 +2144,7 @@ fn anim_card_geom(
     };
     let title_px = st.fonts.body;
     let sub_px = st.fonts.small;
-    let gutter_w = if errored {
+    let gutter_w = if errored || warned {
         m.pin_r * 1.6 + m.label_gap
     } else {
         0.0
@@ -2103,6 +2210,7 @@ fn anim_card_geom(
         tint: n.tint,
         missing: false,
         errored,
+        warned,
         reroute: false,
         chip: None,
         anim: Some(AnimCard { kind, subtitle }),
@@ -11261,6 +11369,8 @@ fn draw_nodes(
             }
             let border_col = if errored {
                 status.error
+            } else if g.warned {
+                status.warning.with_alpha(WARN_DIM)
             } else {
                 st.palette.stroke_strong
             };
@@ -11283,9 +11393,14 @@ fn draw_nodes(
             if lod.glyphs() {
                 let header_c = srect.min.y + m.header_h * zoom * 0.5;
                 let mut x = srect.min.x + m.pad_x * zoom;
-                if errored {
+                if errored || g.warned {
                     let r = m.pin_r * zoom * 0.8;
-                    p.circle_filled(Pos2::new(x + r, header_c), r, status.error);
+                    let col = if errored {
+                        status.error
+                    } else {
+                        status.warning.with_alpha(WARN_DIM)
+                    };
+                    p.circle_filled(Pos2::new(x + r, header_c), r, col);
                     x += r * 2.0 + m.label_gap * zoom;
                 }
                 let (title_col, px) = match card.kind {
@@ -11391,6 +11506,7 @@ fn draw_nodes(
                 // does in the gutter: the stop is now.
                 _ if paused_here => status.warning,
                 _ if g.missing || errored => status.error,
+                _ if g.warned => status.warning.with_alpha(WARN_DIM),
                 _ => st.palette.stroke,
             },
         );
@@ -11500,13 +11616,21 @@ fn draw_nodes(
                     ),
                 ));
                 r * 2.0 + m.label_gap * zoom
-            } else if errored || g.missing {
+            } else if errored || g.missing || g.warned {
                 let r = m.pin_r * zoom * 0.8;
                 let c = Pos2::new(
                     srect.min.x + m.pad_x * zoom + r,
                     srect.min.y + m.header_h * zoom * 0.5,
                 );
-                p.circle_filled(c, r, status.error);
+                // A warning wears the error disc's shape in the warning
+                // tone, dimmed (Task 41.7 D6) — an error on the same node
+                // outranks it.
+                let col = if errored || g.missing {
+                    status.error
+                } else {
+                    status.warning.with_alpha(WARN_DIM)
+                };
+                p.circle_filled(c, r, col);
                 p.text(
                     Pos2::new(c.x - title_px * 0.16, c.y - title_px * 0.52),
                     "!",
@@ -13089,21 +13213,24 @@ fn error_chip(
     );
     let id = ui.alloc_id("graph_error_chip");
     let resp = ui.interact(id, chip);
+    // Warnings alone (Task 41.7 D6) turn the chip to the warning tone: the
+    // count still cycles them, but nothing is refusing.
+    let tone = if errors.only_warnings() { status.warning } else { status.error };
     {
         let mut p = ui.painter();
         // Count chips are filters: status tint fill, status border, a dot.
-        p.rect_filled(chip, st.rounding.small, status.error.with_alpha(0.13));
-        p.rect_stroke(chip, st.rounding.small, st.metrics.border, status.error);
+        p.rect_filled(chip, st.rounding.small, tone.with_alpha(0.13));
+        p.rect_stroke(chip, st.rounding.small, st.metrics.border, tone);
         p.circle_filled(
             Pos2::new(chip.min.x + pad, chip.center().y),
             font * 0.22,
-            status.error,
+            tone,
         );
         p.text_family(
             Pos2::new(chip.min.x + pad + font * 0.5, chip.center().y - font * 0.62),
             &count,
             font,
-            status.error,
+            tone,
             None,
             FontFamily::Mono,
         );
@@ -13604,6 +13731,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: true,
             chip: None,
             anim: None,
@@ -13809,6 +13937,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: false,
             chip: None,
             anim: None,
@@ -13869,6 +13998,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: false,
             chip: None,
             anim: None,
@@ -14404,6 +14534,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: false,
             chip: None,
             anim: None,
