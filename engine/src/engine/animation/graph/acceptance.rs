@@ -395,15 +395,10 @@ fn the_committed_demo_document_loads_and_compiles() {
     assert!(rule.triggers.is_empty());
 }
 
-/// The demo rig arms and poses against the real `Defeated.mesh` skeleton
-/// through the real system + disk loader — the headless twin of "press
-/// F5 and the character is not in a T-pose".
-#[test]
-fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
-    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("content");
+/// The demo rig on the real `Defeated.mesh` skeleton through the real
+/// system + disk loader: armed, then `ticks` frames with `aim` set before
+/// each. Returns the world, the rig and its bind-pose locals.
+fn run_demo_rig(aim: f32, ticks: usize) -> (hecs::World, hecs::Entity, Vec<LocalBoneTransform>) {
     let mut resources = Resources::new();
     let mut time = Time::new();
     time.delta = 1.0 / 60.0;
@@ -412,7 +407,7 @@ fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
     resources.insert(AnimClipCache::new());
     resources.insert(BlendSpaceCache::new());
     let mut system = AnimGraphSystem::new(Box::new(super::DiskAnimAssets {
-        content_root: content,
+        content_root: demo_content(),
     }));
     let mut world = hecs::World::new();
     let rig = world.spawn((
@@ -429,9 +424,21 @@ fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
         assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
         world.get::<&SkeletonInstance>(rig).unwrap().local_transforms.clone()
     };
-    for _ in 0..30 {
+    for _ in 0..ticks {
+        let mut rt = world.get::<&mut AnimGraphRuntime>(rig).expect("armed");
+        assert!(rt.params.set_float("aim", aim), "aim is a declared Float");
+        drop(rt);
         system.run(&mut world, &mut resources);
     }
+    (world, rig, bind)
+}
+
+/// The demo rig arms and poses against the real `Defeated.mesh` skeleton
+/// through the real system + disk loader — the headless twin of "press
+/// F5 and the character is not in a T-pose".
+#[test]
+fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
+    let (world, rig, bind) = run_demo_rig(0.0, 30);
     let skel = world.get::<&SkeletonInstance>(rig).unwrap();
     let moved = skel
         .local_transforms
@@ -455,21 +462,80 @@ fn the_locomotion_demo_rig_arms_and_poses_on_the_real_skeleton() {
     );
 }
 
+/// Task 41.7 P6: the demo Layer (`Idle_1` masked to `mixamorig:Spine` on
+/// `aim`) touches only the spine subtree — at `aim = 1` the spine, chest
+/// and head leave the `aim = 0` pose while a leg bone stays bit-identical.
+#[test]
+fn the_demo_layer_moves_the_spine_subtree_and_nothing_below_it() {
+    let (base_world, base_rig, _) = run_demo_rig(0.0, 30);
+    let (aim_world, aim_rig, _) = run_demo_rig(1.0, 30);
+    let base = base_world.get::<&SkeletonInstance>(base_rig).unwrap();
+    let aim = aim_world.get::<&SkeletonInstance>(aim_rig).unwrap();
+    let local = |skel: &SkeletonInstance, name: &str| {
+        let i = skel
+            .bones
+            .iter()
+            .position(|b| b.name == name)
+            .unwrap_or_else(|| panic!("bone {name}"));
+        let t = skel.local_transforms[i];
+        (t.translation, t.rotation, t.scale)
+    };
+    for bone in ["mixamorig:Spine", "mixamorig:Spine1", "mixamorig:Head"] {
+        assert_ne!(local(&base, bone), local(&aim, bone), "{bone} holds the layered idle");
+    }
+    let leg = "mixamorig:LeftUpLeg";
+    assert_eq!(local(&base, leg), local(&aim, leg), "the legs are the base's");
+}
+
 /// Task 41.6 P4: the locomotion demo graph, read from disk. This pins
 /// structure, not content: the machine copied from `character.animgraph`,
 /// the `foot_ik` Float and the two foot chains sharing one pelvis (bone
-/// existence is an arm-time check).
+/// existence is an arm-time check). Task 41.7 P6 adds the pipeline:
+/// `SM ─base▶ Layer(Spine, aim) ◀layer─ Clip(Idle_1)` → foot_l → foot_r.
 #[test]
 fn the_locomotion_demo_document_loads_and_compiles() {
-    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("content");
+    let content = demo_content();
     let path = "graphs/locomotion_demo.animgraph";
     let doc = node_graph_types::load_graph(&content.join(path)).expect("the demo animgraph loads");
     let load = super::DiskAnimAssets { content_root: content };
-    let plan = plan::compile_anim_graph_with(&doc, path, &load)
-        .expect("the demo animgraph compiles").plan;
+    let compiled = plan::compile_anim_graph_with(&doc, path, &load)
+        .expect("the demo animgraph compiles");
+    assert!(compiled.warnings.is_empty(), "{:?}", compiled.warnings);
+    let plan = compiled.plan;
+
+    let aim = plan
+        .parameters
+        .iter()
+        .find(|p| p.slug == "aim")
+        .expect("aim declared");
+    assert_eq!(aim.ty, plan::AnimParamType::Float);
+    assert_eq!(aim.default, super::machine::ParamValue::Float(0.0), "invisible until raised");
+    let node_of = |ty: &str| doc.nodes.iter().find(|n| n.type_id == ty).map(|n| n.id).expect(ty);
+    assert_eq!(plan.root_clips.len(), 1);
+    assert_eq!(plan.root_clips[0].clip.clip, "anims/Idle_1.anim");
+    assert_eq!(plan.root_clips[0].speed, 1.0);
+    assert_eq!(plan.root_clips[0].node_id, node_of(plan::ANIM_CLIP_TYPE_ID));
+    assert_eq!(
+        plan.pipeline.root,
+        PlanPose::Layer {
+            base: Box::new(PlanPose::Machine(0)),
+            layer: Box::new(PlanPose::Clip(0)),
+            mask: PlanMask {
+                roots: vec!["mixamorig:Spine".into()],
+                include_root: true,
+            },
+            weight_param: "aim".into(),
+            node_id: node_of(ANIM_PIPE_LAYER_TYPE_ID),
+        }
+    );
+    assert!(plan.slots.is_empty(), "no cast clip supplied (deferred)");
+    let ik_names: Vec<&str> = plan
+        .pipeline
+        .ik_order
+        .iter()
+        .map(|i| plan.ik_chains[*i].name.as_str())
+        .collect();
+    assert_eq!(ik_names, ["foot_l", "foot_r"]);
 
     assert_eq!(plan.states[plan.entry].name, "Idle");
     for state in ["Idle", "Locomotion", "Jump", "Death"] {
@@ -4252,7 +4318,7 @@ fn a_foot_lock_edge_forces_evaluation_while_throttled() {
 // ---------------------------------------------------------------------------
 
 use super::pipeline::{
-    is_machine_node, needs_pipeline_root, upgrade_pipeline_root, MachineSource, PlanMask,
+    is_pipeline_node, needs_pipeline_root, upgrade_pipeline_root, MachineSource, PlanMask,
     PlanPose, ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID,
     FAMILY_PIPELINE, LAYER_BASE_PIN, LAYER_INCLUDE_ROOT_PROP, LAYER_LAYER_PIN,
     LAYER_WEIGHT_PARAM_PROP, MASK_BONES_PROP, PIPELINE_ROW_STEP, PIPE_IN_PIN,
@@ -4362,71 +4428,111 @@ fn shipped_animgraphs() -> Vec<(String, GraphDoc, super::DiskAnimAssets)> {
         .collect()
 }
 
-/// A pre-41.7 document (machine + loose slot/IK nodes) compiles to exactly
-/// what its upgraded self compiles to — the compiler synthesises the same
-/// implicit pipeline the upgrade writes — without touching the caller's
-/// document; the upgrade is idempotent and never re-fires.
+/// P6 writer: saves the shipped animgraphs through the real upgrade and
+/// the canonical serializer (never by hand) and gives the locomotion demo
+/// its upper-body Layer. Idempotent. Opt-in:
+/// `cargo test -p rust_engine --features editor -- write_shipped_animgraphs --ignored`.
 #[test]
-fn the_shipped_graphs_upgrade_to_a_pipeline_root_and_compile_identically() {
+#[ignore]
+fn write_shipped_animgraphs_as_pipeline_roots() {
+    let content = demo_content();
+    for (path, mut doc, _) in shipped_animgraphs() {
+        upgrade_pipeline_root(&mut doc);
+        if path.ends_with("locomotion_demo.animgraph") {
+            add_demo_upper_body_layer(&mut doc);
+        }
+        std::fs::write(content.join(&path), serialize_graph(&doc).unwrap()).unwrap();
+    }
+}
+
+/// U5 stand-in: `Idle_1` masked to `mixamorig:Spine` on a new `aim` Float
+/// (default 0 — the demo looks exactly like 41.6 until the user raises it).
+/// `SM ─base▶ Layer ◀layer─ Clip` takes over the State Machine's wire into
+/// the first chain; the row shifts one step right, the Clip sits above the
+/// Layer. A no-op once a Layer exists.
+fn add_demo_upper_body_layer(doc: &mut GraphDoc) {
+    if doc.nodes.iter().any(|n| n.type_id == ANIM_PIPE_LAYER_TYPE_ID) {
+        return;
+    }
+    let id_of = |d: &GraphDoc, ty: &str| d.nodes.iter().find(|n| n.type_id == ty).expect(ty).id;
+    let sm = id_of(doc, ANIM_PIPE_MACHINE_TYPE_ID);
+    let first = doc
+        .edges
+        .iter()
+        .find(|e| e.from_node == sm)
+        .expect("the State Machine is wired")
+        .to_node;
+    let clip = doc.next_node_id();
+    let layer = clip + 1;
+    doc.variables.push(VarDecl {
+        slug: "aim".into(),
+        label: "Aim".into(),
+        ty: PinType::Float,
+        default: Some(PropValue::Float(0.0)),
+        group: None,
+    });
+    let mut upper = clip_source(clip, Some("Upper idle"), "anims/Idle_1.anim");
+    upper
+        .properties
+        .insert(plan::SPEED_PROP.into(), PropValue::Float(1.0));
+    let mut over = layer_node(layer, Some("Upper body"), "mixamorig:Spine", "aim");
+    over.properties
+        .insert(LAYER_INCLUDE_ROOT_PROP.into(), PropValue::Bool(true));
+    doc.nodes.extend([upper, over]);
+    doc.edges
+        .retain(|e| !(e.from_node == sm && e.to_node == first));
+    doc.edges.extend([
+        pose_edge(sm, layer, LAYER_BASE_PIN),
+        pose_edge(clip, layer, LAYER_LAYER_PIN),
+        pose_edge(layer, first, PIPE_IN_PIN),
+    ]);
+    let step = PIPELINE_ROW_STEP;
+    for n in doc
+        .nodes
+        .iter_mut()
+        .filter(|n| is_pipeline_node(&n.type_id) && n.id != sm)
+    {
+        n.position[0] += step;
+    }
+    doc.node_mut(clip).unwrap().position = [step, -180.0];
+    doc.node_mut(layer).unwrap().position = [step, 0.0];
+}
+
+/// P6: the shipped animgraphs are saved v4 pipeline-root documents — the
+/// canonical text on disk (no diff churn on reopen), no re-upgrade, one
+/// inline State Machine and one Output Pose, a warning-free compile.
+/// `character` / `defeated` are `SM → Output`; the demo's Layer is pinned
+/// by `the_locomotion_demo_document_loads_and_compiles`. The v3-shaped ↔
+/// upgraded parity lives with the synthetic fixtures.
+#[test]
+fn the_shipped_graphs_are_saved_pipeline_root_documents() {
+    let content = demo_content();
     for (path, doc, load) in shipped_animgraphs() {
-        assert!(needs_pipeline_root(&doc), "{path} is a v3 document");
-        let before = doc.clone();
-        let legacy = plan::compile_anim_graph_with(&doc, &path, &load).expect("compiles");
-        assert_eq!(doc, before, "compiling never mutates the caller's document");
+        assert!(!needs_pipeline_root(&doc), "{path} is a v4 document");
+        assert!(!upgrade_pipeline_root(&mut doc.clone()), "{path}: no re-upgrade");
+        // Line endings are the platform's (ron writes CRLF on Windows and
+        // `.animgraph` is not in `.gitattributes`): compare normalised.
+        let lf = |s: String| s.replace("\r\n", "\n");
+        let text = lf(std::fs::read_to_string(content.join(&path)).unwrap());
+        assert!(text.starts_with("(\n    version: 4,"), "{path}");
+        assert_eq!(lf(serialize_graph(&doc).unwrap()), text, "{path}: canonical on disk");
+        let count = |ty: &str| doc.nodes.iter().filter(|n| n.type_id == ty).count();
+        assert_eq!(count(ANIM_PIPE_MACHINE_TYPE_ID), 1, "{path}");
+        assert_eq!(count(ANIM_PIPE_OUTPUT_TYPE_ID), 1, "{path}");
 
-        let mut up = doc.clone();
-        assert!(upgrade_pipeline_root(&mut up), "{path}");
-        assert!(!needs_pipeline_root(&up));
-        assert!(!upgrade_pipeline_root(&mut up.clone()), "idempotent: {path}");
-        let upgraded = plan::compile_anim_graph_with(&up, &path, &load).expect("compiles");
-        assert_eq!(upgraded, legacy, "{path}: synthesised == upgraded");
-        assert!(legacy.warnings.is_empty(), "{path}: {:?}", legacy.warnings);
-
-        let p = &legacy.plan;
+        let c = plan::compile_anim_graph_with(&doc, &path, &load).expect("compiles");
+        assert!(c.warnings.is_empty(), "{path}: {:?}", c.warnings);
+        let p = &c.plan;
         assert_eq!(p.machines.len(), 1);
         assert_eq!(p.machines[0].source, MachineSource::Inline);
         assert_eq!(p.inline_machine, 0);
-        assert!(p.root_clips.is_empty());
-        // Legacy order preserved: slots by id, chains by id.
-        assert_eq!(p.pipeline.slot_order, (0..p.slots.len()).collect::<Vec<_>>());
+        assert!(p.slots.is_empty(), "{path}");
         assert_eq!(p.pipeline.ik_order, (0..p.ik_chains.len()).collect::<Vec<_>>());
-        assert_eq!(p.pipeline.root, PlanPose::Machine(0), "{path}: no slots");
-
-        // Machine nodes, regions and variables untouched; the new nodes wire
-        // SM → (slots, chains) → Output on a row.
-        let machine = |d: &GraphDoc| -> Vec<NodeInst> {
-            d.nodes
-                .iter()
-                .filter(|n| is_machine_node(&n.type_id))
-                .cloned()
-                .collect()
-        };
-        assert_eq!(machine(&up), machine(&doc));
-        assert_eq!(up.regions, doc.regions);
-        assert_eq!(up.variables, doc.variables);
-        let sm = up
-            .nodes
-            .iter()
-            .find(|n| n.type_id == ANIM_PIPE_MACHINE_TYPE_ID)
-            .expect("an inline State Machine");
-        let out = up
-            .nodes
-            .iter()
-            .find(|n| n.type_id == ANIM_PIPE_OUTPUT_TYPE_ID)
-            .expect("an Output Pose");
-        let chain_ids: Vec<u64> = p.ik_chains.iter().map(|c| c.node_id).collect();
-        let mut expect_edges: Vec<Edge> = Vec::new();
-        let mut prev = sm.id;
-        for id in chain_ids.iter().copied().chain([out.id]) {
-            expect_edges.push(pose_edge(prev, id, PIPE_IN_PIN));
-            prev = id;
+        if !path.contains("locomotion_demo") {
+            assert_eq!(count(ANIM_PIPE_LAYER_TYPE_ID), 0, "{path}");
+            assert!(p.root_clips.is_empty(), "{path}");
+            assert_eq!(p.pipeline.root, PlanPose::Machine(0), "{path}: SM → Output");
         }
-        assert_eq!(up.edges[doc.edges.len()..].to_vec(), expect_edges, "{path}");
-        assert_eq!(sm.position, [0.0, 0.0]);
-        assert_eq!(
-            out.position,
-            [(chain_ids.len() + 1) as f32 * PIPELINE_ROW_STEP, 0.0]
-        );
     }
 }
 
@@ -5291,10 +5397,12 @@ fn run_demo(assets: Box<dyn AnimAssetLoader + Send + Sync>, legacy: bool) -> Vec
     palettes
 }
 
-/// Golden parity on the shipped demo: the v3 document as-is and the same
-/// document after `upgrade_pipeline_root` drive the real rig through 120
-/// scripted ticks to bit-identical palettes — and the pipeline walk matches
-/// the pre-41.7 evaluator (and event collection) on every tick.
+/// Golden parity on the shipped demo: the document as loaded and the same
+/// document through `upgrade_pipeline_root` (a no-op since P6 saved it as
+/// v4) drive the real rig through 120 scripted ticks to bit-identical
+/// palettes — and the pipeline walk matches the pre-41.7 evaluator (and
+/// event collection) on every tick, which since P6 also pins that the
+/// demo's Layer at `aim = 0` is invisible.
 #[test]
 fn the_migrated_demo_graph_animates_identically() {
     let content = demo_content();

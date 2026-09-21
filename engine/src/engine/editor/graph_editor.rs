@@ -9605,12 +9605,12 @@ pub(crate) fn test_state(path: &str) -> GraphEditorState {
 mod scope_tests {
     use super::*;
     use crate::engine::animation::graph::plan::{
-        ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
+        ANIM_CLIP_TYPE_ID, ANIM_ENTRY_TYPE_ID, ANIM_IK_CHAIN_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID,
         ANIM_STATE_TYPE_ID, ANIM_TRANSITION_TYPE_ID, GRAPH_PROP,
     };
     use crate::engine::animation::graph::{
-        anim_node_registry, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID,
-        FAMILY_PIPELINE,
+        anim_node_registry, ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID,
+        ANIM_PIPE_OUTPUT_TYPE_ID, FAMILY_PIPELINE,
     };
 
     fn node(id: u64, type_id: &str) -> NodeInst {
@@ -9670,9 +9670,15 @@ mod scope_tests {
         assert_eq!(count(&st, ANIM_PIPE_MACHINE_TYPE_ID), 1);
         assert_eq!(count(&st, ANIM_PIPE_OUTPUT_TYPE_ID), 1);
         assert_eq!(count(&st, ANIM_IK_CHAIN_TYPE_ID), 2);
-        assert_eq!(st.visible_nodes().count(), 4, "SM, Output and the two IK chains");
+        assert_eq!(count(&st, ANIM_CLIP_TYPE_ID), 1);
+        assert_eq!(count(&st, ANIM_PIPE_LAYER_TYPE_ID), 1);
+        assert_eq!(
+            st.visible_nodes().count(),
+            6,
+            "SM, Clip, Layer, the two IK chains and Output"
+        );
         let pipeline_edges = st.visible_edges().count();
-        assert_eq!(pipeline_edges, 3, "SM > IK > IK > Output");
+        assert_eq!(pipeline_edges, 5, "SM > Layer < Clip; Layer > IK > IK > Output");
 
         assert!(st.enter_machine_scope(&reg));
         assert_eq!(count(&st, ANIM_ENTRY_TYPE_ID), 1);
@@ -9680,7 +9686,7 @@ mod scope_tests {
         assert_eq!(count(&st, ANIM_STATE_ALIAS_TYPE_ID), 1);
         assert_eq!(count(&st, ANIM_TRANSITION_TYPE_ID), 8);
         assert_eq!(
-            st.visible_nodes().count() + 4,
+            st.visible_nodes().count() + 6,
             st.doc.nodes.len(),
             "every node is on one canvas"
         );
