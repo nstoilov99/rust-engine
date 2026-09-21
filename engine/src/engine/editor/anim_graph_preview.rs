@@ -644,7 +644,7 @@ mod tests {
         }
         fn load_skeleton(&self, rel: &str) -> Option<Vec<BoneData>> {
             match rel {
-                "a.mesh" => Some(bones(&["root"])),
+                "a.mesh" => Some(bones(&["other"])),
                 "b.mesh" => Some(bones(&["root", "child"])),
                 "c.mesh" => Some(vec![]),
                 _ => None,

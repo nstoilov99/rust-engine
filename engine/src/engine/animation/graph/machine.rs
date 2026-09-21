@@ -985,14 +985,12 @@ impl PlayOnceSlot {
                 p.time += dt * speed;
             }
         }
-        let order = &plan.pipeline.slot_order;
-        let n = if order.is_empty() {
-            plan.slots.len()
-        } else {
-            order.len()
-        };
+        // Compiled wire order; index order only for hand-built plans (R13).
+        // A compiled plan whose Play Once nodes are all unreachable has an
+        // empty order and must start nothing.
+        let n = plan.pipeline.slot_count(plan.slots.len());
         for k in 0..n {
-            let i = if order.is_empty() { k } else { order[k] };
+            let i = plan.pipeline.slot_index(k);
             let Some(slot) = plan.slots.get(i) else { continue };
             if params.trigger_set(&slot.trigger) == Some(true) {
                 // Arming refused missing clips; a race just leaves the

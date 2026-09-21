@@ -195,6 +195,32 @@ pub struct PlanPipeline {
     pub slot_order: Vec<usize>,
     /// IK application order, each chain seeing the previous one's result.
     pub ik_order: Vec<usize>,
+    /// `true` when the compiler produced the orders: an empty order then
+    /// means "nothing reachable" and must stay empty. `false` on hand-built
+    /// plans (tests, the blend-space preview) and nested plans, whose empty
+    /// orders fall back to index order (R13).
+    pub compiled: bool,
+}
+
+impl PlanPipeline {
+    /// Slot arbitration order: the compiled wire order, or index order for
+    /// an uncompiled plan.
+    pub fn slot_index(&self, k: usize) -> usize {
+        if self.compiled { self.slot_order[k] } else { k }
+    }
+
+    pub fn slot_count(&self, uncompiled_len: usize) -> usize {
+        if self.compiled { self.slot_order.len() } else { uncompiled_len }
+    }
+
+    /// IK application order, same rule.
+    pub fn ik_index(&self, k: usize) -> usize {
+        if self.compiled { self.ik_order[k] } else { k }
+    }
+
+    pub fn ik_count(&self, uncompiled_len: usize) -> usize {
+        if self.compiled { self.ik_order.len() } else { uncompiled_len }
+    }
 }
 
 impl Default for PlanPipeline {
@@ -206,6 +232,7 @@ impl Default for PlanPipeline {
             root: PlanPose::Machine(0),
             slot_order: Vec::new(),
             ik_order: Vec::new(),
+            compiled: false,
         }
     }
 }
@@ -692,6 +719,7 @@ pub(super) fn assemble(
                 root: PlanPose::Machine(0),
                 slot_order: (0..slots.len()).collect(),
                 ik_order: (0..ik_chains.len()).collect(),
+                compiled: true,
             },
             slots,
             ik_chains,
@@ -789,6 +817,7 @@ pub(super) fn assemble(
             root,
             slot_order,
             ik_order,
+            compiled: true,
         },
         slots,
         ik_chains,

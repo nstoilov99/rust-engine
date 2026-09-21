@@ -1374,10 +1374,12 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         }
     }
     let params = &rt.params;
-    let order = &rt.plan.pipeline.ik_order;
-    let n = if order.is_empty() { rt.ik.len() } else { order.len() };
+    // Compiled wire order; index order only for hand-built plans (R13). A
+    // compiled plan whose IK Chain nodes are all unreachable has an empty
+    // order and must solve nothing (they carry the "not connected" warning).
+    let n = rt.plan.pipeline.ik_count(rt.ik.len());
     for k in 0..n {
-        let i = if order.is_empty() { k } else { order[k] };
+        let i = rt.plan.pipeline.ik_index(k);
         let Some(chain) = rt.ik.get_mut(i) else { continue };
         let weight = params
             .get_float(&chain.weight_param)
