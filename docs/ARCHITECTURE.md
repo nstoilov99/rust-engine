@@ -795,6 +795,9 @@ use it). Skipped frames hold the last pose; no interpolation in v1.
 Frame order per entity, inside the eval gate: machine → blend trees →
 play-once overlay → `compute_model_space()` → `apply_ik` →
 `refresh_palette_from_model_space()` — one palette pass, one revision bump.
+Since 41.7 the local-space part is the pipeline walk
+(`PipelineState::evaluate`: machines, root clips, layers, overlays) and
+chains apply in wire order — see ▸ Animation Pipeline.
 
 - **Solvers** (`animation/ik.rs`, pure, no ECS): two-bone analytic with a
   pole vector — supplied by the target, or (since 41.6) built by the runner
@@ -804,9 +807,12 @@ play-once overlay → `compute_model_space()` → `apply_ik` →
   translation only — animated scale is never touched. Weight blends in
   model space per edited bone (`blend_model`: slerp/lerp, scale kept).
 - **Chains from the graph**: `PlanIkChain { name, bones, solver,
-  weight_param, foot }` compiles from `anim_ik_chain` nodes on the machine
-  canvas (pin-less, like play-once slots); bone names resolve to indices at
-  arm time, refusals disable the runtime with an anchored message.
+  weight_param, foot }` compiles from `anim_ik_chain` nodes — since 41.7
+  these carry Pose pins and form the pipeline canvas's IK tail, applied in
+  wire order (`ik_order`); before 41.7 they were pin-less nodes on the
+  machine canvas applied in node-id order (▸ Animation Pipeline). Bone
+  names resolve to indices at arm time, refusals disable the runtime with
+  an anchored message.
   `weight_param` is a declared Float, so states fade IK through the normal
   parameter contract; weight 0 skips the solve and all writes.
 - **Targets**: `IkTargets` (world Z-up, keyed by chain name) is resolved to
@@ -848,8 +854,9 @@ clip-layout gate as "skipped" — numbers in `roadmap/ROADMAP.md` ▸ Task 41.5.
 
 A playable third-person character on an offline scene:
 `content/scenes/locomotion_demo.scene`, graph
-`content/graphs/locomotion_demo.animgraph`, real Mixamo clips in
-`content/anims/`. Plan and rulings:
+`content/graphs/locomotion_demo.animgraph` (since 41.7 a pipeline root:
+`State Machine → Layer(Idle_1 on mixamorig:Spine, weight aim) → foot_l →
+foot_r → Output Pose`), real Mixamo clips in `content/anims/`. Plan and rulings:
 [`VULKANO-41.6-LOCOMOTION-DEMO.md`](roadmap/VULKANO-41.6-LOCOMOTION-DEMO.md);
 close-out in `roadmap/ROADMAP.md` ▸ Task 41.6. Gameplay code:
 `game_client/src/systems/{player_input,character_movement,orbit_camera}.rs`
@@ -1033,7 +1040,9 @@ resolved serially, `apply_ik` on retained model space); what a foot target
   `<chain>_up`; on reach failure (`apply_ik` finds `|hip → held| > 0.98 ·
   (l1 + l2)`, uses the offset target that frame and sets
   `release_requested`, consumed by `place_feet` next frame); or when the
-  machine leaves the planting state (Idle never fires `_up`). Every release
+  machine leaves the planting state (Idle never fires `_up`); since 41.7
+  also when a whole-body Play Once starts (▸ Animation Pipeline ▸ Events
+  and foot locks). Every release
   blends 0.1 s (`RELEASE_SECS`) from the held point to the offset target;
   every edge sets `force_eval_external`.
 - **Footfall events are authored by tool** (`animation/footfall.rs`,
@@ -1051,6 +1060,306 @@ resolved serially, `apply_ik` on retained model space); what a foot target
   bone-table hash); dropped bones printed once), filled into
   `AnimGraphRuntime.clips` in `run` step 2 because `arm()` runs before the
   entity has a `SkeletonInstance`.
+
+## Animation Pipeline (Task 41.7)
+
+The `.animgraph` root is a constrained pose graph in the Unreal AnimGraph
+shape: *what the character does* is the state machine, *how the final pose
+is assembled* is the pipeline — pose sources → per-bone layers / overlays →
+IK tail → Output Pose. The state machine is one node on that canvas. Plan +
+decisions D1–D7, U1–U5:
+[`VULKANO-41.7-ANIM-PIPELINE-ROOT.md`](roadmap/VULKANO-41.7-ANIM-PIPELINE-ROOT.md);
+close-out in `roadmap/ROADMAP.md` ▸ Task 41.7. Code:
+`animation/graph/pipeline.rs` (node set, plan types, compiler walk,
+upgrade), `plan.rs` (`Compiled`, `compile_machine`), `machine.rs` ▸
+Pipeline evaluation (`PipelineState`), `runner.rs` (arming, `tick_entity`),
+`foot_placement.rs`; editor: `graph_editor.rs` (`CanvasScope`,
+`compile_report`), `graph_editor_crusty.rs` (chips, breadcrumb, warning
+paint), `anim_graph_preview.rs`.
+
+### One flat document, two node families
+
+Regions cannot nest (`regions: BTreeMap<owner, GraphRegion>` is one level
+deep: a state's blend tree, a transition's rule), so the pipeline is not a
+container around the machine: both families live in the document's one
+`nodes` list and are partitioned **by type**.
+
+| Family | Types | Canvas |
+|---|---|---|
+| machine | `anim_entry`, `anim_state`, `anim_state_alias`, `anim_transition` | Machine scope (the pre-41.7 canvas) |
+| pipeline | `anim_pipe_machine`, `anim_clip` (root source), `anim_pipe_layer`, `anim_play_once`, `anim_ik_chain`, `anim_pipe_output` | Pipeline scope (the root) |
+
+Edges partition with their endpoints (`anim_flow` = machine, `anim_pose` =
+pipeline); a wire straddling families is a compile refusal and cannot be
+authored (pin domains differ). Regions keep their owner-id keying.
+Comments and groups carry `family: Option<String>` (container v4; `None` =
+machine, written only when set so script graphs do not churn).
+`anim_node_registry()` stays the **union** — the editor opens, validates,
+migrates and themes the flat document against it; `anim_machine_registry()`
+/ `anim_pipeline_registry()` are the per-scope palette subsets (R1, R25).
+
+### Pipeline node set
+
+Every pipeline node speaks `anim_pose` pins: `pose` out; `in`, or `base` +
+`layer` on a Layer.
+
+- **State Machine** `anim_pipe_machine` — out Pose. `graph` empty = this
+  document's inline machine (exactly one, required, U4; it is `rt.machine`);
+  a path = a nested `.animgraph`'s machine, evaluated as its own
+  `AnimMachine` in `extra_machines`.
+- **Clip** `anim_clip` — out Pose. A root source with its own clock
+  (`RootClipClock { prev, time }` — the span is needed for event crossings;
+  it only grows, the sampler wraps: root clips always loop, U3), `speed`
+  and event track.
+- **Layered Blend Per Bone** `anim_pipe_layer` — in Base, Layer; out Pose.
+  `bones` (mask roots, comma list; empty refuses — a Layer with no mask is
+  a bug), `weight_param` (declared Float), `include_root` (default true).
+  Base then Layer is the fixed evaluation order and the slot-arbitration
+  order for sibling branches.
+- **Play Once** `anim_play_once` — in/out Pose. Existing props + `bones`
+  (empty = whole body). One overlay channel; **wire order** (the post-order
+  walk from Output, Base before Layer) replaces node-id order for "first
+  triggered wins"; a node applies the clip only if *it* owns the playing
+  slot, otherwise it passes the pose through.
+- **IK Chain** `anim_ik_chain` — in/out Pose; model-space stage, wire
+  order; foot config unchanged (41.5 R11).
+- **Output Pose** `anim_pipe_output` — in Pose, exactly one.
+
+### Compile
+
+`compile_doc` runs the upgrades on a private `Cow` copy — a v3 document is
+synthesised into a pipeline root there, so compile(v3) ≡ compile(upgraded)
+by construction (R2) — then `compile_parameters` → `compile_machine`
+(states / transitions / entry, refuses as before) → `pipeline::assemble`.
+The root walk (`PipeCx::compile`) runs only for the root document: edge
+hygiene over every wire, the Output / inline-SM counts, an IK-prefix walk
+back from Output, the local-space tree, reachability. Refusals (D3,
+anchored on the named node as `<kind> '<name>': …`): exactly one Output
+with its input wired; every reachable pose input wired; stage order
+`[sources] → [Layer | Play Once]* → [IK Chain]* → Output` (`'X' must come
+before the first IK Chain — IK works in model space`); no fan-out, fan-in
+only through a Layer's two inputs; no cross-family wires; an inline State
+Machine that is reachable, at most one; `weight_param` declared Float. A
+reachable loop always fans out, so D3.4 fires before the loop message (R6).
+
+**Warnings** ride a new channel: `compile_anim_graph_with` returns
+`Compiled { plan, warnings: Vec<AnchoredWarning { node_id, message }> }` —
+unreachable pipeline nodes (`… is not connected to Output Pose and is
+ignored`) and lifted nested slots / chains. The runner prints them once at
+arm; the editor renders them dimmed on the node.
+
+**Nested documents** (`anim_pipe_machine.graph` or a state's `graph`): only
+their machine is consumed — their pipeline is never compiled or validated
+(a nested plan has `machines = []`, `inline_machine = 0`, identity orders,
+`compiled = false`, R4). Their slots / IK chains are lifted into the host
+with a warning: host wired first, lifted after (state-nested in state
+order, then pipeline-nested) — host chains always precede nested ones, the
+legacy global id sort is gone (U2). Lifted slots become synthetic
+whole-body `PlanPose::Overlay` entries (`mask: None`, `node_id` = the
+nesting state / State Machine node) just downstream of the host's last Play
+Once in post-order, else wrapping the root (R5).
+
+### Plan
+
+```rust
+PlanMachineRef { node_id, source: MachineSource::{Inline, Nested { graph, plan: Arc<AnimGraphPlan> }} }
+PlanRootClip   { clip: PlanClip, speed, node_id }
+PlanMask       { roots: Vec<String>, include_root }          // symbolic; resolved at arm
+PlanPose::{ Machine(i), Clip(i),
+            Layer   { base, layer, mask, weight_param, node_id },
+            Overlay { input, slot, mask: Option<PlanMask>, node_id } }
+PlanPipeline   { root, slot_order, ik_order, compiled }
+// AnimGraphPlan += machines, inline_machine: usize, root_clips, pipeline
+```
+
+`machines` and `root_clips` are in walk order (post-order, Base before
+Layer — the published extra-machine tick order); `slots` / `ik_chains` keep
+their pre-41.7 Vecs and `plan.ik_chains` stays globally id-sorted (index
+space only); `slot_order` / `ik_order` are the wire orders with lifted
+entries appended. Root clips join `clip_refs()` so prefetch and by-name
+remap cover them. Masks stay **symbolic** in the immutable plan and are
+resolved per skeleton at arm (`arm_masks`, serial, beside `arm_ik_chains`)
+into `rt.masks: BTreeMap<node_id, Vec<f32>>` — keyed by host node id only,
+since nested pipelines are never compiled and lifted slots carry no mask.
+A missing root refuses (`layer #<id>: bone 'Y' is not in the skeleton` /
+`play-once slot 'Name' (#id): …`); an empty mask warns and arms. Mask = 1
+on listed roots (unless `include_root: false`) and every descendant, 0
+elsewhere; overlapping roots union — a listed root nested under another
+listed root is in even with `include_root: false` (R18).
+`compiled: bool` (review F1) gates the order fallback: an uncompiled plan
+(hand-built tests, the blend-space preview, nested plans) with empty orders
+runs index order (R13); a compiled plan whose slots / chains are all
+unreachable has empty orders and runs nothing. `PlanPipeline::slot_index` /
+`slot_count` / `ik_index` / `ik_count` are the only readers.
+
+### Runtime
+
+`AnimGraphRuntime.machine` **stays** the inline machine (foot lock
+`lock_state`, the preview mirror, viz and the acceptance tests kept
+compiling) and gains `extra_machines: Vec<AnimMachine>` (`plan.machines`
+minus the inline one; `extra_machine_index` maps between them, R9),
+`root_clocks: Vec<RootClipClock>` and `masks`. `PipelineState<'a> { plan,
+machine, extra_machines, root_clocks, masks, slot, params }` (`machine.rs`
+▸ Pipeline evaluation) is the **one evaluator** the runner and the editor
+preview share: `evaluate(clip_for, pose, scratch, level)` and
+`collect_events(clip_for, out)`.
+
+`tick_entity`: inline machine → extra machines (`plan.machines` order) →
+root clocks → slot — the published parameter / trigger consumption order;
+forced-eval aggregates crossfade / transition activity across all machines;
+then, inside the eval gate, `PipelineState::evaluate(…, 0)` →
+`compute_model_space` → `apply_ik` over `ik_order` → palette. Throttling,
+parallelism and the serial resolution steps are untouched.
+
+**Scratch allocation contract**: `level` is the first *free* `PoseScratch`
+index for the callee (`evaluate_pose` and `PlayOnceSlot::apply` gained the
+parameter; both hard-coded 0 before). Layer: evaluate Base into the
+caller's `out` at `level`; take `level`, copy `out` into it, evaluate the
+Layer branch into that buffer at `level + 1`, blend into `out` per bone
+with `LocalBoneTransform::blend` weighted by `mask[b] × clamp(w, 0, 1)`
+(non-finite → 0; `w ≤ 0` returns before any blend), release `level`.
+Overlay: evaluate its input into `out`, then `slot.apply_masked(out,
+level, mask)` (`None` = the pre-41.7 arithmetic bit for bit; a masked bone
+at 0 is never blended). Steady-state frames allocate nothing; the pool
+grows once to the pipeline's depth.
+
+Slot arbitration (`PlayOnceSlot::tick`) runs in `slot_order`, IK in
+`ik_order`; the `compiled` rule above decides what an empty order means.
+`whole_body_slot(plan, slot)` answers "does an Overlay carry this slot
+unmasked" — a slot the tree never mentions (hand-built plan) counts as
+whole-body and is never overlaid.
+
+### Events and foot locks (U1)
+
+`rt.events` is cleared **once** per entity per tick, then every source
+appends through `PipelineState::collect_events`: the inline machine, each
+extra machine, each root clip, and the slot's own events exactly once —
+emitted at the Overlay node that owns the playing slot and scaled by the
+weight that branch is heard at (a Layer branch by `weight_param`, so a
+zero-weight Layer is silent; Base-side sources by 1; the slot by its
+envelope). A **whole-body** Play Once (`mask: None`) suppresses base events
+by `1 − weight` as before; a **masked** Play Once suppresses **nothing** —
+markers carry no owning bone, and the important base events (foot
+`_down`/`_up`) live on the legs while masked overlays live on the arms.
+Authoring rule: *masks that cover the legs do not silence footsteps; use a
+whole-body Play Once for full-body actions.* `collect_anim_events` survives
+as the legacy single-machine wrapper (tests, tools).
+
+Foot-lock interruption: a lock is released (normal 0.1 s blend, forced
+eval) when (a) the planting state is left (41.6), (b) a **whole-body** Play
+Once starts — `PlayOnceSlot::started()` is set by `tick` and read by
+`place_feet` next frame together with `whole_body_slot` (R12; the same
+one-frame latency the `_down` / `_up` fires have), (c) the reach guard
+trips, (d) `<chain>_up` fires. A masked Play Once never touches locks.
+Pinned in `acceptance.rs` ▸ Pipeline runtime: a locked foot survives a
+masked cast and keeps releasing on `_up`; a whole-body overlay releases it
+on start.
+
+### Migration (v3 → v4)
+
+`migrate_container` 3→4 is a stamp, and `parse_graph` stamps *before* any
+domain upgrade runs, so the trigger is **structural**: `needs_pipeline_root`
+= has machine nodes and none of the pipeline-*only* types
+(`anim_pipe_machine`, `anim_clip`, `anim_pipe_layer`, `anim_pipe_output` —
+loose slots / chains are legal v3 content, R3). `upgrade_pipeline_root`
+runs beside `upgrade_any_state` at the three load sites: the compiler's
+`Cow` copy, both runtime loaders (`DiskAnimAssets::graph`,
+`ArmLoader::graph`, in memory), and the editor's `open` (`dirty +
+migrated`, toast "Upgraded to pipeline root", R15). It adds the inline SM
+and Output, chains existing Play Once nodes (id order) then IK Chain nodes
+(id order) then Output, wired `pose → in`, on a row: SM at x = 0, moved
+nodes at (i+1)·`PIPELINE_ROW_STEP` (260), Output last, y = 0; machine
+positions, regions, variables and ids untouched. Comments and groups
+enclosing only moved nodes (node position inside the rect, at least one)
+are tagged `pipeline` and translated with their first node; everything
+else stays untagged (R7). A document with pipeline nodes but no Output is
+an authored deletion → refusal D3.1, never a re-upgrade. The shipped
+graphs are v4 on disk, written by the `#[ignore]` writer test
+`write_shipped_animgraphs_as_pipeline_roots` (real upgrade + canonical
+serializer, idempotent; the demo's Layer is added there, R33) — rerun it
+after any future upgrade step rather than hand-editing RON.
+
+### Editor: two scopes, one state
+
+`CanvasScope::{Pipeline, Machine}` on `GraphEditorState` (animation
+documents only; `from_doc` starts at Pipeline). `CanvasScope::of_type` =
+`is_pipeline_node` ? Pipeline : Machine — the machine scope shows
+*everything that is not a pipeline node*, so reserved / unknown types stay
+where the old canvas showed them and no node is invisible on both canvases
+(R20). One predicate family answers every question: `node_visible` /
+`visible_nodes` / `visible_edges` / `comment_visible` / `group_visible` (by
+family tag) / `annotation_family()`. `build_geoms` iterates
+`visible_nodes()` — the single node filter; hit tests, marquee,
+auto-layout, frame-all, find and the connect ghost read geoms and inherit
+it; wires follow (`build_wires` drops endpoint-less wires); annotations
+filter at their five direct sites. `is_animation()` gates that meant
+"machine geometry" (compact cards, border wires, connect ghost,
+state→state drop) became `is_machine_scope()`; document-level ones (layout
+profile, preview band, panels, find) stay.
+
+- **Switching** — `set_scope` (via `enter_/leave_machine_scope`): closes an
+  open rule peek (settling its edits, R22), cancels gestures, clears
+  selection and popovers, swaps `view` ⇄ `scope_view` (first visit →
+  `frame_all_on_open`). The per-user sidecar persists `pipeline_view()`
+  only; the machine view is session-only (R23). `reveal(id)` switches to a
+  node's family; F8 / locate onto the other canvas switches and re-queues
+  the locate for the next draw, since this frame's geometry is the old
+  canvas's (R26).
+- **Navigation**: double-click / PageDown on the inline SM enters
+  (`is_inline_machine`); a nested SM opens its file through the existing
+  open-request path; PageUp: close rule → leave machine → ascend the file
+  chain. Breadcrumb `‹graph› › State Machine › rule: …` — the machine
+  crumb is derived from `scope`, never pushed on `nav_back` (file paths
+  only, R24). `open_rule_scope` switches to the machine scope itself, so
+  F8 / find hits into a rule work from the root.
+- **Palette** lists the scope's subset registry; placement, validation and
+  commit stay on the union the document was opened against (R25).
+  **Paste** (animation only): the unknown-type refuse-whole gate first,
+  then nodes of the other family are dropped with a toast (`N node(s)
+  belong(s) to the other canvas — dropped`, R27); pasted and new comments /
+  groups take the showing canvas's family tag (R21).
+- **Header chips** occupy the tag slot — one right-hand mono slot per
+  header (R28): `SLOT #2` / `IK #1` from `applied_order` (the last
+  *successful* compile's `slot_order` / `ik_order`, kept across a refusal
+  so chips do not flicker; host slots are the plan's first N, chains match
+  by id + compiler name so a lifted child never claims a host chip;
+  unreachable nodes wear none, R30), `LAYER · 2 ROOTS`.
+- **Details**: Play Once + Bones; Layer Bones / Weight (Choice over Float
+  variables) / Include Root; State Machine a plain `Graph` path field
+  (empty = inline; typing a path nests it) with a read-only `Machine:
+  inline` row, the ENTRY preview-mesh row mirrored through
+  `set_preview_mesh`, and an enter caption — all hidden on a nested SM
+  (R29).
+- **Diagnostics**: `GraphDomain::compile_report` → `DomainReport { errors,
+  applied_order }`; warnings are `DomainError { warning: true }` through
+  the same `ErrorIndex` (`warned` set; error outranks warning on a node;
+  the count chip turns amber when everything it counts is a warning;
+  painted at `WARN_DIM`, R31). `anchor_anim_refusal` gained
+  `anchor_pipeline_refusal`: every `<kind> '<name>'` shape, arm-time
+  `layer #<id>` / `play-once slot 'X' (#id)`, the loop / before-IK /
+  cross-family shapes (the last anchors on the consumer, R32), and the
+  previously missing **IK chain** arm; the "needs" / "at most one" Output
+  and inline-SM shapes stay document-level.
+- **Template** (`new_animgraph_doc`): ENTRY → Idle in the machine, inline
+  SM → Output on the row — already v4-shaped, so opening neither upgrades
+  nor dirties.
+
+### Preview
+
+`AnimGraphPreview` owns the full pipeline state (inline machine,
+`extra_machines`, `root_clocks`, `slot`, `masks`); `advance` ticks it in
+the runtime's order (inline → extra → root clocks → slot) and evaluates
+through `PipelineState::evaluate(…, 0)`; it collects no events.
+`Mirror::of_runtime(name, &rt)` is the one place the mirrored field list
+lives — `extra_machines`, `root_clocks` **and** `slot`, so the pane shows
+a playing overlay (R16). Masks are armed against the **panel's** skeleton
+via `arm_masks`, never copied from the entity, and a refusal is the pane's
+`status` with the runtime's exact message (`diagnose` returns
+`Result<masks, status>`, re-run on rebuild and on mirror change, R17).
+Clips arm on **any** bone overlap (`bones_overlap`, review F2), like the
+runtime; only a zero-overlap set stays unarmed so "bones don't match" can
+still be reported. The blend-space preview keeps `evaluate_pose` — its
+plan literal has no pipeline nodes (R19).
 
 ## Performance Profiling
 

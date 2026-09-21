@@ -2270,8 +2270,9 @@ products only (Unreal Engine EULA, not Fab Standard License — no open-source
 release found as of 2026-09), and a sparse set (Mixamo) makes motion
 matching look worse than a tuned blend space. Prerequisites in order:
 inertialization blending (needed for state-machine transitions anyway),
-the Task 41.7 pose graph (Motion Matching becomes a pose-source node beside
-State Machine), a Z-up trajectory predictor from the controller, an
+the pose graph — shipped as Task 41.7, so Motion Matching would be one more
+pose-source node beside State Machine and Clip on the pipeline canvas — a
+Z-up trajectory predictor from the controller, an
 import-time feature database (foot pos/vel, hip vel, future trajectory
 samples; KD tree or SIMD brute force), the search/switch node with hold
 time, and stride/orientation warping (no root motion here). Roughly 3–4
@@ -2380,6 +2381,135 @@ Rapier's Average friction combine → P7.
   today).
 - Port the real clips to `character.animgraph` for the net player (the
   user's working tree carries uncommitted edits to that file).
+
+---
+
+### Task 41.7: Animation Pipeline Root
+**Status:** ✅ **Complete** (2026-09-21) — test-proven; the user's live
+check (demo parity, the `aim` layer, the crowd bench) is still pending,
+see Acceptance. Plan + decisions D1–D7, U1–U5:
+[`VULKANO-41.7-ANIM-PIPELINE-ROOT.md`](VULKANO-41.7-ANIM-PIPELINE-ROOT.md);
+process rulings R1–R36 + review notes in `.scratch/pipeline/spec.md`.
+**Prerequisites:** Task 41, 41.5, 41.6 (the demo graph is the migration fixture)
+
+The `.animgraph` root becomes a constrained pose graph in the Unreal
+AnimGraph shape (decided 2026-09-06): the state machine is one node on a
+**pipeline canvas** that assembles the final pose — pose sources
+(State Machine, Clip) → Layered Blend Per Bone / Play Once overlays → IK
+Chain tail → Output Pose. Slots and IK chains stop being loose nodes beside
+the states; per-bone layering (combat casts over locomotion) is the payoff.
+Both node families share one flat document (regions cannot nest) and are
+partitioned by type into two canvas scopes. Architecture:
+`docs/ARCHITECTURE.md` ▸ Animation Pipeline; gotchas: `docs/KNOWLEDGE.md`
+▸ Animation Pipeline Gotchas.
+
+**Commit map** (branch `task-41.7-anim-pipeline-root`, oldest first)
+
+| Pkg | Commit | What landed |
+|---|---|---|
+| P0 | `78697e8` | Plan draft v0 |
+| P0 | `17570a4` | Plan v1 — Codex/Astra round 1: warnings channel, event ownership, seven packages |
+| P0 | `9e423bf` | Plan v2 — Codex/Astra round 2: event/foot-lock contract, structural upgrade trigger, user decisions U1–U5 |
+| P1 | `4cde025` | Schema, registry and compiler: container v4 + annotation `family`, `pipeline.rs` (node set, plan types, `assemble` walk, D3 refusals, `Compiled` warnings channel), `upgrade_pipeline_root` (pure, unwired), union + subset registries, fixture and refusal tests |
+| — | `f06b713` | Preview keeps the bone-mismatch diagnosis under by-name remap (two preview tests failing on main since `149efed`) |
+| P2 | `b1a8471` | Runtime + activation: `PipelineState` evaluator (allocation contract, `level`), `extra_machines`, `RootClipClock`, `arm_masks`, `slot_order` / `ik_order`, event contract U1 (clear once, append per source), foot-lock rule (b), upgrade wired at the three load sites, golden parity + foot-lock acceptance tests |
+| P3 | `5fa8535` | Layered blend per bone acceptance (clamp, half weight, missing channels, `include_root`, roots union), root clips, masked Play Once; preview evaluator shares `PipelineState`, `Mirror::of_runtime` (+ `slot`), masks armed per skeleton |
+| P4 | `b840934` | Editor scopes: `CanvasScope`, one visibility predicate family, per-scope views, breadcrumb / double-click / PageUp / PageDown, palette subsets, split-paste, annotation family tags |
+| P5 | `4f8ad99` | Editor authoring: `compile_report` + `applied_order`, header chips, Details rows, warning rendering, `anchor_pipeline_refusal` (+ the missing IK arm), F8 scope switch, v4 new-document template |
+| P6 | `d2bfc91` | Shipped graphs saved as pipeline roots by the writer test; demo Layer `Idle_1` on `mixamorig:Spine` behind `aim` (U5 stand-in) |
+| R | `0c354da` | Opus review fixes: `PlanPipeline::compiled` (F1), preview arms on any bone overlap (F2) |
+| P7 | — | Close-out docs (this entry) |
+
+**What shipped.** Pipeline node set (`anim_pipe_machine`, `anim_clip` as
+a root source, `anim_pipe_layer`, `anim_play_once` / `anim_ik_chain` with
+Pose pins, `anim_pipe_output`) in the same flat document, partitioned by
+type; separate machine and pipeline compilers with D3 refusals and a
+warnings channel; `PlanPipeline` (wire-ordered slots / chains, symbolic
+masks resolved at arm); one shared `PipelineState` evaluator (runner and
+preview) with the scratch allocation contract, extra machines, root clip
+clocks; the event-ownership contract and foot-lock rule (b); structural
+v3→v4 upgrade at the three load sites; editor `CanvasScope` with one
+visibility predicate, breadcrumb navigation, palette subsets, split-paste,
+header chips, Details rows, anchored warnings and IK refusals; the three
+shipped graphs re-saved as pipeline roots and the demo's upper-body Layer.
+
+**Accepted decisions (2026-09-21)**
+
+- **U1** Masked overlays never suppress base events nor touch foot locks;
+  whole-body overlays suppress by `1 − weight` and release foot locks on
+  start (markers carry no owning bone).
+- **U2** Host IK chains run before lifted nested chains; the legacy global
+  node-id interleave is not preserved (no shipped content nests).
+- **U3** Root clips always loop (no `loop` prop).
+- **U4** v1 requires an inline State Machine (`inline_machine: usize`;
+  pure-clip documents deferred).
+- **U5** Demo layer clip: a user-supplied upper-body clip, else `Idle_1`
+  masked to `mixamorig:Spine` — the stand-in shipped, no cast clip was
+  supplied.
+
+**Acceptance (plan §5)**
+
+| §5 item | Result |
+|---|---|
+| Opening any shipped animgraph shows `State Machine → … → Output Pose`; double-click enters the machine, breadcrumb returns; saving writes v4; reopening is stable | test-proven (`the_shipped_graphs_are_saved_pipeline_root_documents`: no re-upgrade, disk == canonical serialization; scope / navigation / template tests); **live check pending** |
+| Golden parity: migrated documents animate bit-identically; the demo character looks the same live | test-proven per tick against the legacy evaluator (`assert_legacy_frame`: demo graph 120 ticks on the real rig + synthetic slot / nested fixtures); **live look pending** |
+| Layer `Idle_1` on the spine at `aim = 1` holds the upper body while the legs walk, `aim = 0` restores; a masked Play Once on the arms keeps foot locks working | test-proven (`the_demo_layer_moves_the_spine_subtree_and_nothing_below_it`, masked-cast / whole-body lock tests); **live `aim` check pending**; no cast clip supplied → cast deferred |
+| Every D3 refusal anchors on its node in the pipeline scope; IK refusals anchor; warnings render | test-proven (`pipeline_refusals_and_warnings_anchor_to_their_node`, `warnings_anchor_and_chips_read_the_applied_order`); paint not eyeballed |
+| `--stress-anim 300` within 5 % of the 41.5 numbers on the migrated bench graph | **not run** — the user's crowd bench is pending |
+| Engine + client tests green; both hosts launch with a clean schedule | per-package gates green (no new systems); live launch pending |
+
+Live check commands: `cargo run -p game_client --features editor` → open
+`scenes/locomotion_demo.scene` → F5 (walk, jump, die; raise `aim` to 1 in
+the graph tab's Variables panel), `cargo run -p game_client -- --scene
+scenes/locomotion_demo.scene`, and `--stress-anim 300` on
+`character.animgraph`.
+
+**Review notes.** Two Codex/Astra rounds on the plan
+(`.scratch/pipeline/astra{1,2}.out`) fed v1 and v2: round 1 resolved
+scope-as-filter with a centralised predicate, lifting kept with provenance,
+chained Play Once nodes, local-space-only layering, one inline machine,
+root clips, migrated-node re-layout, and named masked-event × foot-lock
+semantics the riskiest item; round 2 produced the event-ownership /
+foot-lock contract, the structural (not version) upgrade trigger and the
+U1–U5 decision list. One Opus code review of P1–P5 after P6: **F1** fixed
+(`PlanPipeline::compiled` — the R13 index-order fallback was reachable from
+a compiled plan whose IK chains were all unreachable), **F2** fixed (the
+preview refused to arm clips with partial bone coverage; Mixamo fingertip
+bones), **F3** wording (parity is proven by the per-tick
+`assert_legacy_frame` comparison, not by the v3-vs-upgraded halves, which
+share a code path by R2), **F4–F7** noted, not fixed (F5 / F6 are nits in
+the deferred ledger; F7: runtime `disabled` strings carry a `"{graph}: "`
+prefix the anchor arms do not strip).
+
+**Deferred ledger** (plan non-goals merged with in-flight deferrals)
+
+- Additive layers; mesh-space (component-space) blending — local-space
+  layering of the spine inherits the base's pelvis orientation until real
+  casts show it matters.
+- Per-bone weight falloff curves on masks; multiple overlay channels
+  (one Play Once channel in v1); cached-pose nodes; arbitrary DAGs with
+  fan-out.
+- `loop` on root clips (U3); pure-clip documents without an inline State
+  Machine (U4 — needs absent-machine sentinels in foot locking and the
+  preview mirror).
+- Forbidding nested documents' lifted slots / chains (kept for compat with
+  provenance + warning; D3.7).
+- Owning-bone event markers, so a masked overlay could honestly silence
+  the base events its mask covers.
+- A masked Play Once cast in the demo (U5: no clip supplied; the demo
+  compiles with `slots = []`).
+- Per-scope bookmarks (`Ctrl+B` is per tab — a bookmark taken on one canvas
+  restores a view on the other); persisted machine-scope view (session-only
+  today).
+- Nested pipeline machines have no readout in the preview strip
+  (`state_label` / `time()` / `snapshot()` read the inline machine only).
+- Anchoring runtime refusals: arm-time `disabled` strings carry the
+  `"{graph}: "` prefix (F7); only compile messages and the preview's
+  `status` anchor today.
+- Review nits F5 / F6.
+- `*.animgraph -text` in `.gitattributes` (ron writes the platform newline;
+  the disk-equality test normalises CRLF meanwhile — R35).
+- Motion Matching as another pose-source node (see the note under 41.5).
 
 ---
 
@@ -3428,6 +3558,7 @@ Seventh potential consumer of the Node Graph Framework. Node-based UI layout and
 | **41** | **Animation Graph** | Game Architecture | Feature | **1st consumer** |
 | 41.5 | ✅ Animation at Scale + IK | Game Architecture | Performance | |
 | 41.6 | ✅ Locomotion Demo (offline character, orbit camera, foot IK v2) | Game Architecture | Feature | |
+| 41.7 | ✅ Animation Pipeline Root (pipeline canvas, per-bone layers, event/foot-lock contract; live check pending) | Game Architecture | Feature | |
 | 42 | 🔀 Save/Load & Runtime Persistence (networked part → M5) | Game Architecture | Feature | |
 | 43 | 🔀 Scene Management & Transitions (zone lifecycle → M4) | Game Architecture | Feature | |
 | 44 | Asset Cooking & Level Streaming | Game Architecture | Infrastructure | |

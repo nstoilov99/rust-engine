@@ -567,6 +567,79 @@ pub struct EntityRef {
   for an unlocked foot; leave `pole: None` for foot chains so the knee is
   taken from the current pose.
 
+## Animation Pipeline Gotchas (Task 41.7)
+
+- **Regions cannot nest — scope over the flat document, never a container.**
+  `regions` is one level deep (a state's blend tree, a transition's rule),
+  so the pipeline is a *type partition* of the top-level `nodes` list
+  (`is_pipeline_node`) shown through `CanvasScope`, not a region around the
+  machine. Anything that walks `doc.nodes` on an animation document must
+  go through `visible_nodes()` / `node_visible` or it will draw, hit or
+  lay out the other canvas's nodes.
+- **`parse_graph` stamps the version before domain upgrades run** — a "v3
+  document" is never observable by version once parsed. Animation upgrade
+  triggers are structural (`needs_pipeline_root`: machine nodes and no
+  pipeline-*only* type; loose slots / chains are legal v3 content). Do not
+  add a version-gated animation upgrade; and a document with pipeline nodes
+  but no Output is an authored deletion (refusal), not a re-upgrade.
+- **`anim_node_registry()` is the union of both families; the subsets are
+  for palettes only.** The editor opens, validates, migrates and themes the
+  flat document against the union; placing, validating or committing
+  against a subset flags the other family as unknown types (R25). Use
+  `anim_machine_registry()` / `anim_pipeline_registry()` for listing.
+- **An empty `slot_order` / `ik_order` means two different things.** On a
+  compiled root plan it means "nothing reachable — run nothing"; on an
+  uncompiled plan (hand-built tests, the blend-space preview, nested plans)
+  it falls back to index order (R13). `PlanPipeline::compiled` decides;
+  always read orders through `slot_index` / `slot_count` / `ik_index` /
+  `ik_count`, never `if order.is_empty()` — that shortcut solved
+  unreachable IK chains (review F1).
+- **Masks are keyed by host node id only.** Nested pipelines are never
+  compiled, so `rt.masks: BTreeMap<node_id, _>` has no cross-document
+  collision, and lifted slots carry no mask. Masks are symbolic in the plan
+  and resolved per skeleton at arm (`arm_masks`); the preview arms against
+  its *own* skeleton and never copies the entity's.
+- **Masked overlays never silence base events or touch foot locks; only
+  whole-body ones do** (U1). Markers carry no owning bone, so a masked Play
+  Once suppresses nothing and a lock survives it; a whole-body Play Once
+  suppresses base events by `1 − weight` and releases every lock on start
+  (`slot.started()` read by `place_feet` next frame). A full-body action
+  that must cut footsteps needs an empty `bones`.
+- **A partial-channel layer leaks into the next frame's base.** Unkeyed
+  channels keep their pre-sample value (the agreement every blend in
+  `machine.rs` relies on): once a Layer whose clip keys rotation / scale
+  has blended into a bone whose base clip keys only translation, the next
+  frame's *base* pose already carries that rotation / scale. A test that
+  reads a base pose must take it before the layer ever blends (P3's SQT
+  test reads it off the arming tick).
+- **The preview arms clips on any bone overlap, like the runtime.** The
+  Mixamo X Bot clips name seven fingertip bones differently from
+  `Defeated.mesh`; requiring full coverage (`bones_cover`) left them
+  unarmed and the preview posed nothing. Only a zero-overlap set stays
+  unarmed so "bones don't match" can still be diagnosed (`bones_overlap`,
+  review F2) — a mismatch fixture must be *disjoint* (`["other"]`), not a
+  subset.
+- **Parity is proven by `assert_legacy_frame`, not by the v3-vs-v4 file
+  halves.** The compiler upgrades a v3 document on a private `Cow` copy
+  (R2), so compile(v3) ≡ compile(upgraded) by construction and comparing
+  the two proves nothing. The golden tests compare every tick against the
+  surviving legacy evaluator (`evaluate_pose` + `slot.apply` +
+  `collect_anim_events`); keep that path alive as long as the tests cite it
+  (review F3).
+- **Runtime `disabled` strings carry a `"{graph}: "` prefix the anchor arms
+  do not strip** (review F7). Only compile-time messages are anchored
+  today; the preview's `status` carries the bare `layer #<id>: …` /
+  `IK chain 'X': …` shape and anchors. Strip the prefix before feeding a
+  runtime `disabled` string to `anchor_anim_refusal`.
+- **`-p rust_engine` tests need `--features editor` — run them.** Two
+  preview tests (`a_chosen_mesh_wins_and_a_mismatch_is_explained`,
+  `the_entry_nodes_preview_mesh_wins_and_a_mismatch_is_explained`) had been
+  failing on main since `149efed`: the by-name remap made
+  `arm_clips_to_skeleton` overwrite a clip's bone table with the
+  skeleton's, hiding the mismatch diagnosis. Nobody noticed until P1's gate
+  (fixed in `f06b713`, relaxed to overlap by F2). The editor-feature suite
+  is part of every package gate for a reason.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing
