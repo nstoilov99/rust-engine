@@ -976,9 +976,16 @@ impl AnimGraphSystem {
 
         // Clips load with the plan, not per frame — and a state whose clip is
         // missing refuses here, against the state's name, instead of playing
-        // a frozen pose with no explanation.
-        if let Some(clips) = resources.get_mut::<AnimClipCache>() {
-            clips.prefetch(&plan.clip_refs(), &*self.loader);
+        // a frozen pose with no explanation. A host world without the clip
+        // cache at all refuses the same way: silently arming against nothing
+        // left every character of a scene tab in a T-pose (Task 41.7).
+        match resources.get_mut::<AnimClipCache>() {
+            Some(clips) => clips.prefetch(&plan.clip_refs(), &*self.loader),
+            None => {
+                return refused(format!(
+                    "{graph}: the host world has no AnimClipCache resource — nothing can animate"
+                ))
+            }
         }
         if let Some(clips) = resources.get::<AnimClipCache>() {
             let none = BTreeMap::new();

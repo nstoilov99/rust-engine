@@ -2106,6 +2106,30 @@ fn a_missing_clip_refuses_to_arm_with_a_reason() {
     assert!(why.contains("Walk") && why.contains("missing.anim"), "{why}");
 }
 
+/// A world without the clip cache used to arm silently and then never
+/// evaluate (the runner's step 3 needs the cache) — a scene tab in the
+/// editor showed every character in a T-pose with nothing to explain it.
+#[test]
+fn a_world_without_the_clip_cache_refuses_to_arm_with_a_reason() {
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), two_state_doc());
+    let mut h = Harness::new(assets);
+    h.resources.remove::<AnimClipCache>();
+
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    h.tick();
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    let why = rt.disabled.as_deref().expect("refused");
+    assert!(why.contains("AnimClipCache"), "{why}");
+}
+
 // ---------------------------------------------------------------------------
 // Play-once slot and anim events (ticket 07)
 // ---------------------------------------------------------------------------

@@ -425,6 +425,18 @@ struct SkinnedPreviewTarget<'a> {
     what: &'a str,
 }
 
+/// The animation-graph runtime's per-world resources: the compiled-plan,
+/// clip and blend-space caches `AnimGraphSystem` arms against. Every world
+/// the schedule runs on needs them — the startup world and each fresh scene
+/// tab world; a world without them arms nothing (the runner refuses with a
+/// reason since Task 41.7).
+fn insert_anim_caches(world: &mut GameWorld) {
+    use rust_engine::engine::animation::graph::{AnimClipCache, AnimGraphPlanCache, BlendSpaceCache};
+    world.resources_mut().insert(AnimGraphPlanCache::new());
+    world.resources_mut().insert(AnimClipCache::new());
+    world.resources_mut().insert(BlendSpaceCache::new());
+}
+
 /// `<dir>/<stem>.<ext>`, or `<stem> (n).<ext>` when that already exists.
 #[cfg(feature = "editor")]
 fn unique_output_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
@@ -632,9 +644,7 @@ impl App {
                 AnimClipCache, AnimGraphPlanCache, AnimGraphRunner, AnimGraphRuntime,
                 AnimGraphSystem, BlendSpaceCache, DiskAnimAssets, IkTargets,
             };
-            game_world.resources_mut().insert(AnimGraphPlanCache::new());
-            game_world.resources_mut().insert(AnimClipCache::new());
-            game_world.resources_mut().insert(BlendSpaceCache::new());
+            insert_anim_caches(&mut game_world);
             // Task 41.5 P6: foot placement feeds IK targets from ground
             // raycasts — serial, immediately before the graph system.
             schedule.add_system_described(
@@ -5128,6 +5138,14 @@ impl App {
         if let Some(gamepad_state) = GamepadState::try_new() {
             world.resources_mut().insert(gamepad_state);
         }
+        // The animation runtime's caches are per world (Task 41.7 finding:
+        // a scene opened in a tab armed its graphs against a world without
+        // them and silently never evaluated — every character in a T-pose).
+        insert_anim_caches(&mut world);
+        #[cfg(feature = "graph-scripting")]
+        world
+            .resources_mut()
+            .insert(rust_engine::engine::scripting::GraphLogSink::new());
         world
     }
 
