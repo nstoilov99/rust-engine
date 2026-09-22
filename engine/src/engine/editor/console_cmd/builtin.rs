@@ -236,11 +236,21 @@ impl ConsoleCommand for AnimStatusCommand {
                                 .any(|v| *v > 1e-4)
                         })
                         .count();
+                    let b0 = s.local_transforms.first();
                     format!(
-                        "skeleton {} bones, revision {}, palette bones off bind pose: {}",
+                        "skeleton {} bones, revision {}, dirty {}, palette bones off bind pose: {}, \
+                         bone0 local t=({:.3},{:.3},{:.3}) r=({:.3},{:.3},{:.3},{:.3})",
                         s.bones.len(),
                         s.revision,
-                        posed
+                        s.dirty,
+                        posed,
+                        b0.map_or(0.0, |b| b.translation.x),
+                        b0.map_or(0.0, |b| b.translation.y),
+                        b0.map_or(0.0, |b| b.translation.z),
+                        b0.map_or(0.0, |b| b.rotation.x),
+                        b0.map_or(0.0, |b| b.rotation.y),
+                        b0.map_or(0.0, |b| b.rotation.z),
+                        b0.map_or(1.0, |b| b.rotation.w),
                     )
                 }
                 None => "NO SkeletonInstance".to_string(),
@@ -256,17 +266,22 @@ impl ConsoleCommand for AnimStatusCommand {
                             .get(rt.machine.current_state())
                             .map(|s| s.name.as_str())
                             .unwrap_or("?");
+                        let refs = rt.plan.clip_refs();
+                        let armed = refs.iter().filter(|r| rt.clips.contains_key(**r)).count();
                         format!(
-                            "armed gen {}, state '{}', bucket {}, eval_this_frame {}, pending_first {}, \
-                             extra machines {}, masks {}, ik chains {}",
+                            "armed gen {}, state '{}', machine time {:.3}s, bucket {}, eval_this_frame {}, \
+                             pending_first {}, extra machines {}, masks {}, ik chains {}, clips armed {}/{}",
                             rt.generation,
                             state,
+                            rt.machine.time(),
                             rt.throttle.bucket,
                             rt.throttle.eval_this_frame,
                             rt.throttle.pending_first_eval,
                             rt.extra_machines.len(),
                             rt.masks.len(),
-                            rt.ik.len()
+                            rt.ik.len(),
+                            armed,
+                            refs.len()
                         )
                     }
                 },
