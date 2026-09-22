@@ -640,6 +640,17 @@ pub struct EntityRef {
   (fixed in `f06b713`, relaxed to overlap by F2). The editor-feature suite
   is part of every package gate for a reason.
 
+- **Every world the schedule runs on needs the animation caches.** The
+  editor builds a fresh `GameWorld` per scene tab (`fresh_scene_world`);
+  until 2026-09-23 it lacked `AnimGraphPlanCache` / `AnimClipCache` /
+  `BlendSpaceCache`, so graphs armed silently and never evaluated — every
+  character in a tab-opened scene sat in a T-pose with nothing in the
+  Console. `insert_anim_caches` now serves both worlds, arming refuses
+  loudly without a clip cache, and `anim.status` in the Console prints each
+  runtime's state (armed / refused, machine time, revision, palette bones
+  off bind pose). Plugin-staged resources still reach only the startup
+  world — see the 41.7 deferred ledger.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing

@@ -2482,6 +2482,11 @@ the deferred ledger; F7: runtime `disabled` strings carry a `"{graph}: "`
 prefix the anchor arms do not strip).
 
 **Deferred ledger** (plan non-goals merged with in-flight deferrals)
+- Plugin-staged resources (`GraphPlanCache`, `CurveCache`, `GraphLogSink`)
+  are drained into the startup world only; `fresh_scene_world` (scene tabs)
+  lacks them, so graph scripting in a tab-opened scene likely never runs —
+  found while fixing the 41.7 editor T-pose (animation caches now inserted
+  per world). Fix by installing plugin resources on every fresh world.
 
 - Additive layers; mesh-space (component-space) blending — local-space
   layering of the spine inherits the base's pelvis orientation until real
