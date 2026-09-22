@@ -867,6 +867,23 @@ thread_local! {
         std::cell::RefCell::new(PoseScratch::new());
 }
 
+/// Park an animation refusal (`error`) or compile warning in the graph log
+/// sink, if the host has one — the editor drains it into its Console each
+/// frame. The terminal `println!` stays; this is the copy an author can see
+/// without a terminal.
+#[cfg(feature = "graph-scripting")]
+fn sink_line(resources: &mut Resources, graph: &str, entity: &str, text: String, error: bool) {
+    use crate::engine::scripting::{GraphLogEntry, GraphLogSink};
+    if let Some(sink) = resources.get_mut::<GraphLogSink>() {
+        let level = if error {
+            node_graph_exec::LogLevel::Error
+        } else {
+            node_graph_exec::LogLevel::Warning
+        };
+        sink.push(GraphLogEntry::new(level, graph, entity, text));
+    }
+}
+
 impl AnimGraphSystem {
     pub fn new(loader: Box<dyn AnimAssetLoader + Send + Sync>) -> Self {
         Self {
@@ -888,6 +905,7 @@ impl AnimGraphSystem {
     /// Compile (or reuse) the plan and build a fresh runtime sitting in the
     /// entry state. Every refusal lands in `disabled` rather than panicking.
     fn arm(&self, graph: &str, generation: u64, resources: &mut Resources) -> AnimGraphRuntime {
+        // (see `sink_line` for where refusals and warnings surface)
         debug_assert!(
             !self.evaluating.load(std::sync::atomic::Ordering::Relaxed),
             "arm() must never run inside the parallel evaluation section"
@@ -926,21 +944,25 @@ impl AnimGraphSystem {
                     assets: &*self.loader,
                     spaces: std::cell::RefCell::new(resources.get_mut::<BlendSpaceCache>()),
                 };
+                // Once per compile (the cache holds the plan), so an
+                // ignored pipeline node or a lifted nested chain is said out
+                // loud without spamming every entity.
+                let mut warnings: Vec<String> = Vec::new();
                 let compiled = self
                     .loader
                     .load_graph(graph)
                     .ok_or_else(|| format!("'{graph}' could not be loaded"))
                     .and_then(|doc| compile_anim_graph_with(&doc, graph, &load))
                     .map(|c| {
-                        // Once per compile (the cache holds the plan), so an
-                        // ignored pipeline node or a lifted nested chain is
-                        // said out loud without spamming every entity.
-                        for w in &c.warnings {
-                            eprintln!("animgraph '{graph}': warning: {}", w.message);
-                        }
+                        warnings.extend(c.warnings.iter().map(|w| w.message.clone()));
                         Arc::new(c.plan)
                     });
                 drop(load);
+                for w in warnings {
+                    eprintln!("animgraph '{graph}': warning: {w}");
+                    #[cfg(feature = "graph-scripting")]
+                    sink_line(resources, graph, "-", w, false);
+                }
                 if let Some(cache) = resources.get_mut::<AnimGraphPlanCache>() {
                     cache.store(graph, compiled.clone());
                 }
@@ -1605,9 +1627,20 @@ impl System for AnimGraphSystem {
             }
 
             // Arm-time refusals print once — arming only happens when there
-            // is no runtime, so this cannot repeat per frame.
+            // is no runtime, so this cannot repeat per frame. They also go
+            // to the graph log sink when the host has one, so the editor's
+            // Console shows them: a T-posed character whose reason lives only
+            // in the terminal is not diagnosable from inside the editor.
             if let Some(why) = &runtime.disabled {
                 println!("[animgraph] {entity:?} will not animate — {why}");
+                #[cfg(feature = "graph-scripting")]
+                {
+                    let who = world
+                        .get::<&crate::engine::ecs::components::Name>(entity)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|_| format!("{entity:?}"));
+                    sink_line(resources, &graph, &who, format!("will not animate — {why}"), true);
+                }
             }
             let _ = world.insert_one(entity, runtime);
         }
