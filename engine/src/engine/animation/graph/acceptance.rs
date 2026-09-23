@@ -2130,6 +2130,42 @@ fn a_world_without_the_clip_cache_refuses_to_arm_with_a_reason() {
     assert!(why.contains("AnimClipCache"), "{why}");
 }
 
+/// Animation plays only in Play. With the editor in Edit mode the machine's
+/// clock holds at zero (the entry state's first frame is the posed preview);
+/// flipping to Playing lets it run. Standalone has no `EditorState` and
+/// always runs.
+#[test]
+fn edit_mode_holds_the_machine_clock_and_play_releases_it() {
+    use crate::engine::ecs::resources::{EditorState, PlayMode};
+    let assets = MapAssets::default();
+    assets
+        .graphs
+        .lock()
+        .unwrap()
+        .insert(GRAPH.into(), two_state_doc());
+    let mut h = Harness::new(assets);
+    h.resources.insert(EditorState::new());
+
+    let e = h.world.spawn((
+        AnimGraphRunner::new(GRAPH),
+        SkeletonInstance::from_bones(synthetic_bones()),
+    ));
+    for _ in 0..5 {
+        h.tick();
+    }
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    assert!(rt.disabled.is_none(), "{:?}", rt.disabled);
+    assert_eq!(rt.machine.time(), 0.0, "Edit mode must not advance the clock");
+    drop(rt);
+
+    h.resources.get_mut::<EditorState>().unwrap().play_mode = PlayMode::Playing;
+    for _ in 0..5 {
+        h.tick();
+    }
+    let rt = h.world.get::<&AnimGraphRuntime>(e).unwrap();
+    assert!(rt.machine.time() > 0.4, "Play advances the clock ({})", rt.machine.time());
+}
+
 // ---------------------------------------------------------------------------
 // Play-once slot and anim events (ticket 07)
 // ---------------------------------------------------------------------------

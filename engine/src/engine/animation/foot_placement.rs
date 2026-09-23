@@ -279,10 +279,7 @@ impl System for FootPlacementSystem {
     fn run(&mut self, world: &mut hecs::World, resources: &mut Resources) {
         crate::profile_scope!("foot_placement");
 
-        let dt = resources
-            .get::<Time>()
-            .map(|t| t.scaled_delta())
-            .unwrap_or(0.0);
+        let dt = Time::playing_delta(resources);
 
         // Entities with armed foot chains get their `IkTargets` created here.
         self.missing.clear();

@@ -1533,10 +1533,7 @@ impl System for AnimGraphSystem {
     fn run(&mut self, world: &mut hecs::World, resources: &mut Resources) {
         crate::profile_scope!("anim_graph");
 
-        let dt = resources
-            .get::<Time>()
-            .map(|t| t.scaled_delta())
-            .unwrap_or(0.0);
+        let dt = Time::playing_delta(resources);
         let generation = resources
             .get::<AnimGraphPlanCache>()
             .map(|c| c.generation())

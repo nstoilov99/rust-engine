@@ -651,6 +651,13 @@ pub struct EntityRef {
   off bind pose). Plugin-staged resources still reach only the startup
   world — see the 41.7 deferred ledger.
 
+- **Animation plays only in Play.** Both animation systems take their delta
+  from `Time::playing_delta`, which is zero while the editor is in Edit mode
+  (and while paused), so a character in the level holds the entry state's
+  first frame — a posed preview, not a T-pose — and starts moving on F5.
+  Standalone has no `EditorState` and always runs. The graph and single-clip
+  systems ran unconditionally until 2026-09-23.
+
 ## Performance Gotchas
 
 ### Profile Before Optimizing

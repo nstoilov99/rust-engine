@@ -9,7 +9,7 @@ use crate::engine::ecs::schedule::System;
 /// ECS system that drives skeletal animation each frame.
 ///
 /// For each entity with both `AnimationPlayer` and `SkeletonInstance`:
-/// 1. Advances playback time by `Time::scaled_delta()`
+/// 1. Advances playback time by `Time::playing_delta()` (zero in Edit mode)
 /// 2. Samples keyframes into local bone transforms
 /// 3. Applies crossfade blending if active
 /// 4. Runs forward kinematics to recompute the bone palette
@@ -21,10 +21,7 @@ impl System for AnimationUpdateSystem {
     fn run(&mut self, world: &mut hecs::World, resources: &mut Resources) {
         crate::profile_function!();
 
-        let dt = resources
-            .get::<crate::engine::ecs::resources::Time>()
-            .map(|t| t.scaled_delta())
-            .unwrap_or(0.0);
+        let dt = crate::engine::ecs::resources::Time::playing_delta(resources);
 
         // Graph-driven entities belong to `AnimGraphSystem`; two writers on
         // one skeleton would fight, so the graph wins where both exist.
