@@ -21,8 +21,8 @@ use crate::engine::animation::blend_space::{BlendSpace, BlendSpaceDoc};
 use crate::engine::animation::components::SkeletonInstance;
 use crate::engine::animation::graph::{
     evaluate_pose, AnimAssetLoader, AnimGraphPlan, AnimMachine, AnimParamType, AnimParams,
-    ClipSet, ParamDecl, ParamValue, PlanClip, PlanSpace, PlanState, PlanTree, PoseScratch,
-    PoseSource,
+    ClipSet, MachineSource, ParamDecl, ParamValue, PlanClip, PlanMachineRef, PlanSpace, PlanState,
+    PlanTree, PoseScratch, PoseSource,
 };
 
 /// Default share of the right-hand column the preview pane takes.
@@ -46,16 +46,33 @@ pub fn bones_cover(mesh_bones: &[String], clip_bones: &[String]) -> bool {
     !clip_bones.is_empty() && clip_bones.iter().all(|b| mesh_bones.contains(b))
 }
 
+/// `true` when the mesh has at least one bone the clip names — the
+/// runtime's arming threshold (anything less and the by-name remap would
+/// drop every channel).
+pub fn bones_overlap(mesh_bones: &[String], clip_bones: &[String]) -> bool {
+    clip_bones.iter().any(|b| mesh_bones.contains(b))
+}
+
 /// Task 41.6 D7: arm every loaded set against the preview skeleton by name
 /// — the runner's remap, applied in place. A remapped set carries the
 /// skeleton's table, so a repeat is a no-op; no skeleton, nothing to do.
+/// A set sharing **no** bone with the skeleton is left unarmed so the
+/// preview reports the mismatch ("bones don't match") — arming would
+/// overwrite the clip's table with the skeleton's and hide the diagnosis.
+/// A partial overlap arms exactly like the runtime does (surplus channels
+/// dropped, reported once): the Mixamo X Bot clips name seven fingertip
+/// bones differently from `Defeated.mesh` and must still preview.
 pub fn arm_clips_to_skeleton(
     clips: &mut HashMap<String, Option<ClipSet>>,
     skeleton: Option<&SkeletonInstance>,
 ) {
     let Some(skel) = skeleton else { return };
+    let mesh_bones: Vec<String> = skel.bones.iter().map(|b| b.name.clone()).collect();
     for (path, set) in clips.iter_mut() {
         let Some(set) = set else { continue };
+        if !bones_overlap(&mesh_bones, &set.bone_names) {
+            continue;
+        }
         if let Some((armed, dropped)) = set.armed_for(&skel.bones) {
             if !dropped.is_empty() {
                 eprintln!(
@@ -300,6 +317,7 @@ impl BlendSpacePreview {
             clip_for,
             &mut skel.local_transforms,
             &mut self.scratch,
+            0,
         );
         skel.compute_palette();
     }
@@ -342,10 +360,13 @@ fn one_state_plan(doc: &BlendSpaceDoc, space: &BlendSpace) -> AnimGraphPlan {
             })),
             speed: 1.0,
         }],
-        transitions: Vec::new(),
-        entry: 0,
-        slots: Vec::new(),
-        ik_chains: Vec::new(),
+        // One inline machine straight to Output — the pipeline the compiler
+        // would give a one-state document.
+        machines: vec![PlanMachineRef {
+            node_id: 0,
+            source: MachineSource::Inline,
+        }],
+        ..AnimGraphPlan::default()
     }
 }
 
@@ -406,7 +427,7 @@ mod tests {
 
     fn assets() -> Mem {
         Mem {
-            meshes: vec![("a.mesh", vec!["root"]), ("b.mesh", vec!["root", "child"]), ("c.mesh", vec![])],
+            meshes: vec![("a.mesh", vec!["other"]), ("b.mesh", vec!["root", "child"]), ("c.mesh", vec![])],
             clips: vec![
                 ("walk.anim", vec!["root", "child"], clip("Walk", 2.0, 2.0)),
                 ("run.anim", vec!["root", "child"], clip("Run", 10.0, 10.0)),

@@ -206,6 +206,9 @@ const REROUTE_PIN_OFF: f32 = 0.30;
 const REROUTE_PIN_HIT: f32 = 0.40;
 /// Non-primary members of a multi-selection draw their outline at 55%.
 const SELECTION_REST_ALPHA: f32 = 0.55;
+/// Alpha of the warning tone on a node carrying only a compiler warning
+/// (Task 41.7 D6): the error chrome's shape, dimmed — advisory, not a stop.
+const WARN_DIM: f32 = 0.7;
 /// Hollow (unconnected) pin ring width, world units at ui_scale 1.0.
 const BASE_RING_W: f32 = 1.5;
 
@@ -348,6 +351,10 @@ impl IndexedError {
             IndexedError::Domain(_) => None,
         }
     }
+
+    fn is_warning(&self) -> bool {
+        matches!(self, IndexedError::Domain(e) if e.warning)
+    }
 }
 
 /// This frame's errors, resolved to the thing each one is *about*. Built once
@@ -358,6 +365,10 @@ impl IndexedError {
 struct ErrorIndex {
     /// Nodes carrying a border + gutter badge.
     nodes: BTreeSet<u64>,
+    /// Nodes carrying only a compiler *warning* (Task 41.7 D6): the same
+    /// border + badge in the warning tone, dimmed. An error on the node
+    /// outranks it.
+    warned: BTreeSet<u64>,
     /// Pins carrying an error ring, keyed `(node, slug, is_output)`.
     pins: BTreeSet<(u64, String, bool)>,
     /// Edges drawn in `status.error` with an x at their midpoint.
@@ -385,6 +396,9 @@ impl ErrorIndex {
             .chain(domain_errors.iter().cloned().map(IndexedError::Domain));
         for e in all {
             match e.anchor() {
+                ErrorAnchor::Node(id) if e.is_warning() => {
+                    ix.warned.insert(id);
+                }
                 ErrorAnchor::Node(id) => {
                     ix.nodes.insert(id);
                 }
@@ -413,6 +427,11 @@ impl ErrorIndex {
 
     fn is_empty(&self) -> bool {
         self.ordered.is_empty()
+    }
+
+    /// Nothing but warnings: the count chip wears the warning tone.
+    fn only_warnings(&self) -> bool {
+        self.ordered.iter().all(IndexedError::is_warning)
     }
 
     fn ghosts_for(&self, node: u64) -> &[(String, bool)] {
@@ -773,6 +792,30 @@ fn config_write_back(n: &NodeInst, slug: &str, v: PropValue) -> (String, PropVal
     (ALIAS_STATES_PROP.to_string(), alias_states_value(&ids))
 }
 
+/// The header chip a pipeline node wears in its tag slot (Task 41.7 D6):
+/// `SLOT #2` / `IK #1` is the node's 1-based place in the plan's applied
+/// `slot_order` / `ik_order` from the last successful compile — absent
+/// while the walk from Output Pose does not reach it — and `LAYER · 2 ROOTS`
+/// is the mask's root count. Every other node keeps its plain tag.
+fn pipeline_chip(state: &GraphEditorState, n: &NodeInst, tag: String) -> String {
+    use crate::engine::animation::graph::plan::{ANIM_IK_CHAIN_TYPE_ID, ANIM_PLAY_ONCE_TYPE_ID};
+    use crate::engine::animation::graph::{ANIM_PIPE_LAYER_TYPE_ID, MASK_BONES_PROP};
+    match n.type_id.as_str() {
+        ANIM_PLAY_ONCE_TYPE_ID | ANIM_IK_CHAIN_TYPE_ID => match state.applied_order.get(&n.id) {
+            Some(k) => format!("{tag} #{k}"),
+            None => tag,
+        },
+        ANIM_PIPE_LAYER_TYPE_ID => {
+            let roots = match n.properties.get(MASK_BONES_PROP) {
+                Some(PropValue::Str(s)) => s.split(',').filter(|b| !b.trim().is_empty()).count(),
+                _ => 0,
+            };
+            format!("{tag} \u{b7} {roots} ROOT{}", if roots == 1 { "" } else { "S" })
+        }
+        _ => tag,
+    }
+}
+
 /// The reserved config rows a node instance shows, in render order.
 ///
 /// Sourced from the type's `NodeKind` plus the reserved-key constants, so
@@ -790,7 +833,10 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
         IK_WEIGHT_PARAM_PROP, PRIORITY_PROP, SLOT_FADE_IN_PROP, SLOT_FADE_OUT_PROP,
         SLOT_TRIGGER_PROP, SPACE_PROP, SPEED_PROP,
     };
-    use crate::engine::animation::graph::ALIAS_GLOBAL_PROP;
+    use crate::engine::animation::graph::{
+        ALIAS_GLOBAL_PROP, ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID,
+        LAYER_INCLUDE_ROOT_PROP, LAYER_WEIGHT_PARAM_PROP, MASK_BONES_PROP,
+    };
     let text_of = |key: &str| match n.properties.get(key) {
         Some(PropValue::Str(s)) => s.clone(),
         Some(PropValue::Enum(s)) => s.clone(),
@@ -998,6 +1044,55 @@ pub(super) fn config_rows(n: &NodeInst, docd: &DocDescriptors) -> Vec<(String, S
                 "Fade Out".to_string(),
                 InlineKind::Float(float_of(SLOT_FADE_OUT_PROP, 0.0)),
             ));
+            // Mask roots (Task 41.7 D7): comma-separated; empty = whole body.
+            out.push((
+                MASK_BONES_PROP.to_string(),
+                "Bones".to_string(),
+                InlineKind::Str(text_of(MASK_BONES_PROP)),
+            ));
+        }
+        // A Layer (Task 41.7 D6): mask roots, the Float weight parameter as
+        // a dropdown (the IK weight row's shape), and whether the listed
+        // roots themselves are in the mask.
+        _ if n.type_id == ANIM_PIPE_LAYER_TYPE_ID => {
+            out.push((
+                MASK_BONES_PROP.to_string(),
+                "Bones".to_string(),
+                InlineKind::Str(text_of(MASK_BONES_PROP)),
+            ));
+            let value = text_of(LAYER_WEIGHT_PARAM_PROP);
+            let variants: Vec<String> = docd
+                .doc()
+                .variables
+                .iter()
+                .filter(|v| v.ty == PinType::Float)
+                .map(|v| v.slug.clone())
+                .collect();
+            let ok = variants.contains(&value);
+            out.push((
+                LAYER_WEIGHT_PARAM_PROP.to_string(),
+                "Weight".to_string(),
+                InlineKind::Choice { value, variants, ok },
+            ));
+            let include_root = !matches!(
+                n.properties.get(LAYER_INCLUDE_ROOT_PROP),
+                Some(PropValue::Bool(false))
+            );
+            out.push((
+                LAYER_INCLUDE_ROOT_PROP.to_string(),
+                "Include Root".to_string(),
+                InlineKind::Bool(include_root),
+            ));
+        }
+        // A State Machine node (Task 41.7 D6): the nested `.animgraph`, the
+        // state's Graph row one family over. Empty = the inline machine —
+        // the Details panel says so and offers the preview mesh there.
+        _ if n.type_id == ANIM_PIPE_MACHINE_TYPE_ID => {
+            out.push((
+                GRAPH_PROP.to_string(),
+                "Graph".to_string(),
+                InlineKind::Str(text_of(GRAPH_PROP)),
+            ));
         }
         // An IK Chain (Task 41.5 P5): bones as one comma-separated row
         // (root→tip), the solver enum, the fading Float parameter as a
@@ -1173,6 +1268,9 @@ struct NodeGeom {
     missing: bool,
     /// Carries a validation error: error border + one gutter badge.
     errored: bool,
+    /// Carries a compiler warning and no error (Task 41.7 D6): the same
+    /// border + badge, warning tone, dimmed.
+    warned: bool,
     /// A reroute: a bare typed dot, no header, no rows.
     reroute: bool,
     /// An at-rest transition chip (Task 41): drawn instead of node anatomy.
@@ -1389,10 +1487,11 @@ fn build_geoms(
     // shape it cannot answer with a descriptor, by design.
     let docd = resolver.bind(&state.doc, registry);
 
+    // The scope's canvas only (Task 41.7 D6): every consumer downstream —
+    // hit tests, marquee, wires, framing, layout — reads these geoms, so the
+    // one filter here is the one they all inherit.
     state
-        .doc
-        .nodes
-        .iter()
+        .visible_nodes()
         .map(|n| -> NodeGeom {
             let min = Pos2::new(n.position[0], n.position[1]);
             let is_sub = n.type_id == SUBGRAPH_TYPE_ID;
@@ -1448,6 +1547,7 @@ fn build_geoms(
                     tint: n.tint,
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
+                    warned: errors.warned.contains(&n.id),
                     reroute: true,
                     chip: None,
                     anim: None,
@@ -1516,6 +1616,7 @@ fn build_geoms(
                     tint: n.tint,
                     missing: false,
                     errored: errors.nodes.contains(&n.id),
+                    warned: errors.warned.contains(&n.id),
                     reroute: false,
                     chip: Some(ChipGeom { tip: resolved.tooltip(), dir: Vec2::new(1.0, 0.0) }),
                     anim: None,
@@ -1537,7 +1638,7 @@ fn build_geoms(
             // No pins, no fields. Selecting a *state* or *alias* unfolds the
             // standard card (its config rows) through the generic path
             // below — the transition-chip idiom exactly.
-            if state.domain.is_animation() {
+            if state.is_machine_scope() {
                 use crate::engine::animation::graph::plan::{
                     ANIM_ENTRY_TYPE_ID, ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
                 };
@@ -1612,19 +1713,24 @@ fn build_geoms(
             let tag = crate::engine::animation::graph::anim_node_tag(&n.type_id)
                 .map(str::to_string)
                 .unwrap_or_else(|| derive_tag(is_sub, desc, category.as_deref()));
+            // Task 41.7 D6 header chips ride the tag slot — the applied
+            // order of a reachable Play Once / IK Chain, a Layer's root
+            // count — so they are sized with the header and follow the
+            // scope filter with the node.
+            let tag = pipeline_chip(state, n, tag);
 
             // Task 41 rework: machine nodes keep pins off the card even
             // unfolded — flow wires land on the border. A selected state
             // strips its pin rows before sizing (hidden border anchors are
             // pushed after the pins are built); a selected transition keeps
             // its two pins as hit targets (retargeting) but never draws them.
-            let anim_state_unfold = state.domain.is_animation()
+            let anim_state_unfold = state.is_machine_scope()
                 && matches!(
                     n.type_id.as_str(),
                     crate::engine::animation::graph::plan::ANIM_STATE_TYPE_ID
                         | crate::engine::animation::graph::plan::ANIM_STATE_ALIAS_TYPE_ID
                 );
-            let anim_transition = state.domain.is_animation()
+            let anim_transition = state.is_machine_scope()
                 && n.type_id
                     == crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
             let (inputs, outputs) = if anim_state_unfold {
@@ -1923,6 +2029,7 @@ fn build_geoms(
                 tint: n.tint,
                 missing,
                 errored: errors.nodes.contains(&n.id),
+                warned: errors.warned.contains(&n.id),
                 reroute: is_reroute,
                 chip: None,
                 anim: None,
@@ -2021,6 +2128,7 @@ fn anim_card_geom(
     use crate::engine::animation::graph::plan::{STATE_IN_PIN, STATE_OUT_PIN};
     let min = Pos2::new(n.position[0], n.position[1]);
     let errored = errors.nodes.contains(&n.id);
+    let warned = errors.warned.contains(&n.id);
     let (title, tag, subtitle) = match kind {
         AnimCardKind::Entry => ("\u{25b6} ENTRY".to_string(), String::new(), None),
         AnimCardKind::Alias => (
@@ -2036,7 +2144,7 @@ fn anim_card_geom(
     };
     let title_px = st.fonts.body;
     let sub_px = st.fonts.small;
-    let gutter_w = if errored {
+    let gutter_w = if errored || warned {
         m.pin_r * 1.6 + m.label_gap
     } else {
         0.0
@@ -2102,6 +2210,7 @@ fn anim_card_geom(
         tint: n.tint,
         missing: false,
         errored,
+        warned,
         reroute: false,
         chip: None,
         anim: Some(AnimCard { kind, subtitle }),
@@ -2426,6 +2535,9 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     match breadcrumb_band(ui, state) {
         BreadcrumbClick::None => {}
         BreadcrumbClick::CloseRule => state.close_rule_scope(registry),
+        BreadcrumbClick::ToPipeline => {
+            state.leave_machine_scope(registry);
+        }
         BreadcrumbClick::Ancestor(i) => {
             if let Some(path) = state.nav_back.get(i).cloned() {
                 *open_subgraph = Some(GraphOpenRequest {
@@ -2594,7 +2706,12 @@ pub fn graph_editor_panel(ui: &mut Ui, ctx: GraphEditorPanelCtx) {
     // The Variables dock panel has no canvas; it leaves its locate here for
     // the tab to frame on its next draw (per-document layouts ticket 02).
     let locate = locate.or_else(|| state.locate_request.take());
-    if let Some(id) = locate {
+    if let Some(id) = locate.filter(|&id| state.reveal(id, registry)) {
+        // The node is on the other canvas (Task 41.7 D6): the scope just
+        // switched and this frame's geometry is the old canvas's, so the
+        // locate re-queues for the next draw.
+        state.locate_request = Some(id);
+    } else if let Some(id) = locate {
         state.select_only(id);
         state.flash = Some((id, std::time::Instant::now()));
         if let Some((mn, mx)) = geoms_bbox(out.inner.iter().filter(|g| g.id == id)) {
@@ -2891,7 +3008,9 @@ fn draw_and_interact(
     // the document); every downstream consumer — hit tests, error badges,
     // F8 framing, the live highlight — reads the translated geoms and
     // follows for free.
-    let anim_flow = state.domain.is_animation().then(|| {
+    // The pipeline root (Task 41.7 D6) has pins and routes like a script
+    // graph; only the machine scope derives border-to-border topology.
+    let anim_flow = state.is_machine_scope().then(|| {
         let rects: BTreeMap<u64, [f32; 4]> = geoms
             .iter()
             .map(|g| (g.id, [g.rect.min.x, g.rect.min.y, g.rect.max.x, g.rect.max.y]))
@@ -3731,7 +3850,7 @@ fn draw_and_interact(
             // Compact cards, and the unfolded (selected) state or alias —
             // which lost its `anim` marker by taking the standard-card path.
             && (g.anim.is_some()
-                || (state.domain.is_animation()
+                || (state.is_machine_scope()
                     && state.doc.node(g.id).is_some_and(|n| {
                         use crate::engine::animation::graph::plan::{
                             ANIM_STATE_ALIAS_TYPE_ID, ANIM_STATE_TYPE_ID,
@@ -3789,6 +3908,10 @@ fn draw_and_interact(
         if resp.double_clicked(ui) {
             if let Some(path) = state.file_descend_target(g.id) {
                 *open_subgraph = Some(state.open_request(path));
+            } else if state.is_inline_machine(g.id) {
+                // The inline State Machine (Task 41.7 D6) descends into the
+                // machine scope of this same document — no file involved.
+                state.enter_machine_scope(registry);
             } else {
                 state.open_rule_scope(g.id, registry);
             }
@@ -3867,6 +3990,9 @@ fn draw_and_interact(
         if widget_claimed {
             break;
         }
+        if !state.group_visible(&state.doc.groups[i]) {
+            continue;
+        }
         let r = state.doc.groups[i].rect;
         let bar = Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], m.group_bar));
         if !overlaps(bar, vis) {
@@ -3900,6 +4026,9 @@ fn draw_and_interact(
     for i in (0..state.doc.comments.len()).rev() {
         if widget_claimed {
             break;
+        }
+        if !state.comment_visible(&state.doc.comments[i]) {
+            continue;
         }
         let r = state.doc.comments[i].rect;
         let bar_h = m.comment_bar * state.doc.comments[i].clamped_font_scale();
@@ -3941,7 +4070,7 @@ fn draw_and_interact(
         // The machine level (Task 41 rework): the ghost is a straight arrow
         // from the state's border facing the pointer — where the finished
         // edge will start — and never takes the wire-style route.
-        let machine = state.domain.is_animation();
+        let machine = state.is_machine_scope();
         let src = geoms.iter().find(|g| g.id == from_node).and_then(|g| {
             if machine {
                 let pw = pointer_world?;
@@ -4380,14 +4509,22 @@ fn draw_and_interact(
                     // transition opens its rule peek — no file involved.
                     if let Some(t) = state.rule_descend_target() {
                         state.open_rule_scope(t, registry);
+                    } else if state.machine_descend_target().is_some() {
+                        // The inline State Machine node (Task 41.7 D6): the
+                        // machine scope of this document, no file involved.
+                        state.enter_machine_scope(registry);
                     } else if let Some(path) = state.descend_target() {
                         *open_subgraph = Some(state.open_request(path));
                     }
                 }
                 Action::PARENT_GRAPH => {
-                    // Inside a rule, "up" means back to the machine.
+                    // Inside a rule, "up" means back to the machine; inside
+                    // the machine, back to the pipeline root; at the root,
+                    // back up the file chain.
                     if state.rule_scope.is_some() {
                         state.close_rule_scope(registry);
+                    } else if state.is_machine_scope() {
+                        state.leave_machine_scope(registry);
                     } else if let Some(path) = state.ascend_target() {
                         // The popped remainder is the parent's own chain.
                         *open_subgraph = Some(GraphOpenRequest {
@@ -4833,7 +4970,7 @@ fn anim_select_dim(
     geoms: &[NodeGeom],
 ) {
     use crate::engine::animation::graph::plan::ANIM_TRANSITION_TYPE_ID;
-    if !state.domain.is_animation() || state.rule_scope.is_some() {
+    if !state.is_machine_scope() || state.rule_scope.is_some() {
         return;
     }
     if state.selection.len() != 1 {
@@ -4913,22 +5050,28 @@ fn anim_select_dim(
 /// What the breadcrumb band's one click this frame asked for.
 enum BreadcrumbClick {
     None,
-    /// The current file's crumb, while a rule scope is open — climb out.
+    /// The crumb before an open rule scope (the file, or the machine crumb
+    /// when the rule was peeked from it) — climb out of the rule.
     CloseRule,
+    /// The file crumb while the machine scope shows (Task 41.7 D6) — back to
+    /// the pipeline root (closing any rule on the way).
+    ToPipeline,
     /// An ancestor crumb (index into `nav_back`) — navigate back to it.
     Ancestor(usize),
 }
 
 /// The tab's breadcrumb: the file chain the tab was descended into (ticket
-/// 09 — every ancestor crumb is a link back), the current file, and — while
-/// a rule scope is open (ticket 05) — the non-file scope target:
-/// `character.animgraph ▸ locomotion.animgraph ▸ rule: Idle → Walk · 0.20s`.
-/// Drawn when either has something to say; the two scopes read as one chain,
-/// which is exactly the spec's "breadcrumb distinguishes the two".
+/// 09 — every ancestor crumb is a link back), the current file, the machine
+/// scope when it shows (Task 41.7 D6 — `‹graph› ▸ State Machine`), and —
+/// while a rule scope is open (ticket 05) — the non-file scope target:
+/// `character.animgraph ▸ locomotion.animgraph ▸ State Machine ▸ rule: Idle →
+/// Walk · 0.20s`. Drawn when any has something to say; the scopes read as
+/// one chain, which is exactly the spec's "breadcrumb distinguishes the two".
 fn breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> BreadcrumbClick {
     let chain: &[String] = if state.domain.is_animation() { &state.nav_back } else { &[] };
     let rule = state.rule_scope.as_ref().map(|s| s.owner);
-    if chain.is_empty() && rule.is_none() {
+    let machine = state.is_machine_scope();
+    if chain.is_empty() && rule.is_none() && !machine {
         return BreadcrumbClick::None;
     }
     let st = ui.style();
@@ -4981,15 +5124,40 @@ fn breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> BreadcrumbClick {
     let file = file_name(&state.path);
     let file_w = ui.painter().measure_text(&file, font, None).x;
     let crumb = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(file_w, h));
-    let file_hovered = if rule.is_some() {
+    // The file crumb is a way back out whenever something sits after it: an
+    // open rule, or the machine scope.
+    let file_hovered = if rule.is_some() || machine {
         let id = ui.alloc_id("rule_breadcrumb_file");
         let resp = ui.interact(id, crumb);
         if resp.clicked {
-            clicked = BreadcrumbClick::CloseRule;
+            clicked = if machine {
+                BreadcrumbClick::ToPipeline
+            } else {
+                BreadcrumbClick::CloseRule
+            };
         }
         resp.hovered
     } else {
         false
+    };
+    // The machine crumb follows the file; it is a link while a rule sits
+    // after it (the rule was peeked from the machine, so this climbs out).
+    let machine_text = super::graph_editor::CanvasScope::MACHINE_CRUMB;
+    let machine_crumb = if machine {
+        let w = ui.painter().measure_text(machine_text, font, None).x;
+        let hovered = rule.is_some() && {
+            let crumb =
+                Rect::from_min_size(Pos2::new(x + file_w + sep_w, rect.min.y), Vec2::new(w, h));
+            let id = ui.alloc_id("machine_breadcrumb");
+            let resp = ui.interact(id, crumb);
+            if resp.clicked {
+                clicked = BreadcrumbClick::CloseRule;
+            }
+            resp.hovered
+        };
+        Some((w, hovered))
+    } else {
+        None
     };
     let mut p = ui.painter();
     p.text(
@@ -5000,6 +5168,18 @@ fn breadcrumb_band(ui: &mut Ui, state: &GraphEditorState) -> BreadcrumbClick {
         None,
     );
     x += file_w;
+    if let Some((w, hovered)) = machine_crumb {
+        p.text(Pos2::new(x, ty), sep, font, st.palette.text_disabled, None);
+        x += sep_w;
+        p.text(
+            Pos2::new(x, ty),
+            machine_text,
+            font,
+            if hovered { st.palette.accent_active } else { st.palette.text },
+            None,
+        );
+        x += w;
+    }
 
     if let Some(owner) = rule {
         let scope_text = rule_scope_label(state, owner);
@@ -5844,11 +6024,14 @@ fn purge_confirm(ui: &mut Ui, rect: Rect, state: &mut GraphEditorState, registry
 /// so they are tested first.
 fn annotation_at(state: &GraphEditorState, m: &GraphMetrics, pw: Pos2) -> Option<Annotation> {
     for (i, c) in state.doc.comments.iter().enumerate().rev() {
-        if comment_rect(c, m).contains(pw) {
+        if state.comment_visible(c) && comment_rect(c, m).contains(pw) {
             return Some(Annotation::Comment(i));
         }
     }
     for (i, g) in state.doc.groups.iter().enumerate().rev() {
+        if !state.group_visible(g) {
+            continue;
+        }
         // A group is a frame, not a surface: only its title bar takes the
         // click, or right-clicking anywhere inside one would shadow the
         // canvas menu over a large area.
@@ -5919,7 +6102,7 @@ fn canvas_menu(
         state.canvas_menu = None;
     }
     if select_all {
-        state.selection = state.doc.nodes.iter().map(|n| n.id).collect();
+        state.selection = state.visible_nodes().map(|n| n.id).collect();
         state.canvas_menu = None;
     }
     if do_paste {
@@ -6336,7 +6519,11 @@ fn palette_popover(
         ty: f.ty.clone(),
         need_input: f.output,
     });
-    let entries = graph_palette::build_entries(registry, &p.search, filter.as_ref());
+    // Placement gating (Task 41.7 D6): an animation canvas lists its scope's
+    // family only. Placing and validating the pick stay on `registry` — the
+    // union the document was opened against.
+    let listing = state.palette_registry().unwrap_or(registry);
+    let entries = graph_palette::build_entries(listing, &p.search, filter.as_ref());
     let searching = !p.search.trim().is_empty();
 
     // Extra rows the unfiltered palette offers beyond node types.
@@ -9907,6 +10094,9 @@ fn draw_annotations(
     // Groups first — a group is a region that *contains* things, so it sits
     // below comments, which sit below nodes.
     for (i, g) in state.doc.groups.iter().enumerate() {
+        if !state.group_visible(g) {
+            continue;
+        }
         let wr = group_rect(g, m);
         let clip = wr.intersect(vis);
         if clip.width() <= 0.0 || clip.height() <= 0.0 {
@@ -9952,6 +10142,9 @@ fn draw_annotations(
     }
 
     for (i, c) in state.doc.comments.iter().enumerate() {
+        if !state.comment_visible(c) {
+            continue;
+        }
         let wr = comment_rect(c, m);
         let clip = wr.intersect(vis);
         if clip.width() <= 0.0 || clip.height() <= 0.0 {
@@ -10225,7 +10418,7 @@ fn comment_ref_at(
     ui: &mut Ui,
 ) -> Option<String> {
     for c in state.doc.comments.iter().rev() {
-        if c.collapsed {
+        if c.collapsed || !state.comment_visible(c) {
             continue;
         }
         let wr = comment_rect(c, m);
@@ -11176,6 +11369,8 @@ fn draw_nodes(
             }
             let border_col = if errored {
                 status.error
+            } else if g.warned {
+                status.warning.with_alpha(WARN_DIM)
             } else {
                 st.palette.stroke_strong
             };
@@ -11198,9 +11393,14 @@ fn draw_nodes(
             if lod.glyphs() {
                 let header_c = srect.min.y + m.header_h * zoom * 0.5;
                 let mut x = srect.min.x + m.pad_x * zoom;
-                if errored {
+                if errored || g.warned {
                     let r = m.pin_r * zoom * 0.8;
-                    p.circle_filled(Pos2::new(x + r, header_c), r, status.error);
+                    let col = if errored {
+                        status.error
+                    } else {
+                        status.warning.with_alpha(WARN_DIM)
+                    };
+                    p.circle_filled(Pos2::new(x + r, header_c), r, col);
                     x += r * 2.0 + m.label_gap * zoom;
                 }
                 let (title_col, px) = match card.kind {
@@ -11306,6 +11506,7 @@ fn draw_nodes(
                 // does in the gutter: the stop is now.
                 _ if paused_here => status.warning,
                 _ if g.missing || errored => status.error,
+                _ if g.warned => status.warning.with_alpha(WARN_DIM),
                 _ => st.palette.stroke,
             },
         );
@@ -11415,13 +11616,21 @@ fn draw_nodes(
                     ),
                 ));
                 r * 2.0 + m.label_gap * zoom
-            } else if errored || g.missing {
+            } else if errored || g.missing || g.warned {
                 let r = m.pin_r * zoom * 0.8;
                 let c = Pos2::new(
                     srect.min.x + m.pad_x * zoom + r,
                     srect.min.y + m.header_h * zoom * 0.5,
                 );
-                p.circle_filled(c, r, status.error);
+                // A warning wears the error disc's shape in the warning
+                // tone, dimmed (Task 41.7 D6) — an error on the same node
+                // outranks it.
+                let col = if errored || g.missing {
+                    status.error
+                } else {
+                    status.warning.with_alpha(WARN_DIM)
+                };
+                p.circle_filled(c, r, col);
                 p.text(
                     Pos2::new(c.x - title_px * 0.16, c.y - title_px * 0.52),
                     "!",
@@ -12507,7 +12716,7 @@ fn resolve_connection(
         // The state-machine drag (Task 41): a flow wire dropped state → state
         // means "make a transition here", never a bare edge the compiler
         // would silently ignore.
-        if state.domain.is_animation() {
+        if state.is_machine_scope() {
             if let Some((a, b)) = super::graph_editor::transition_shortcut(&state.doc, &edge) {
                 state.insert_transition_between(a, b, registry);
                 return true;
@@ -12574,7 +12783,7 @@ fn auto_connect(
     // never breaks an existing one — and a state-to-state drop means "make a
     // transition here" (the state-machine drag), same as a pin-to-pin drop.
     if matches!(&pin.ty, PinType::Domain(k) if registry.domain_is_flow(k)) {
-        if state.domain.is_animation() {
+        if state.is_machine_scope() {
             if let Some((a, b)) = super::graph_editor::transition_shortcut(&state.doc, &edge) {
                 state.insert_transition_between(a, b, registry);
                 return;
@@ -12767,10 +12976,10 @@ fn content_bbox(state: &GraphEditorState, geoms: &[NodeGeom]) -> Option<(Vec2, V
             None => (Vec2::new(x0, y0), Vec2::new(x1, y1)),
         });
     };
-    for g in &state.doc.groups {
+    for g in state.doc.groups.iter().filter(|g| state.group_visible(g)) {
         fold(g.rect[0], g.rect[1], g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
     }
-    for c in &state.doc.comments {
+    for c in state.doc.comments.iter().filter(|c| state.comment_visible(c)) {
         fold(c.rect[0], c.rect[1], c.rect[0] + c.rect[2], c.rect[1] + c.rect[3]);
     }
     b
@@ -13004,21 +13213,24 @@ fn error_chip(
     );
     let id = ui.alloc_id("graph_error_chip");
     let resp = ui.interact(id, chip);
+    // Warnings alone (Task 41.7 D6) turn the chip to the warning tone: the
+    // count still cycles them, but nothing is refusing.
+    let tone = if errors.only_warnings() { status.warning } else { status.error };
     {
         let mut p = ui.painter();
         // Count chips are filters: status tint fill, status border, a dot.
-        p.rect_filled(chip, st.rounding.small, status.error.with_alpha(0.13));
-        p.rect_stroke(chip, st.rounding.small, st.metrics.border, status.error);
+        p.rect_filled(chip, st.rounding.small, tone.with_alpha(0.13));
+        p.rect_stroke(chip, st.rounding.small, st.metrics.border, tone);
         p.circle_filled(
             Pos2::new(chip.min.x + pad, chip.center().y),
             font * 0.22,
-            status.error,
+            tone,
         );
         p.text_family(
             Pos2::new(chip.min.x + pad + font * 0.5, chip.center().y - font * 0.62),
             &count,
             font,
-            status.error,
+            tone,
             None,
             FontFamily::Mono,
         );
@@ -13165,6 +13377,13 @@ fn cycle_error(
         ErrorAnchor::Document => None,
     };
     let Some(node) = node else { return };
+    // An error on the other canvas (Task 41.7 D6) switches scope; the
+    // geometry in hand is then the old canvas's, so the framing lands
+    // through the locate path on the next draw.
+    if state.reveal(node, registry) {
+        state.locate_request = Some(node);
+        return;
+    }
     if !matches!(anchored[i].anchor(), ErrorAnchor::Edge(_)) {
         state.select_only(node);
     }
@@ -13512,6 +13731,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: true,
             chip: None,
             anim: None,
@@ -13717,6 +13937,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: false,
             chip: None,
             anim: None,
@@ -13777,6 +13998,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: false,
             chip: None,
             anim: None,
@@ -14312,6 +14534,7 @@ mod tests {
             tint: None,
             missing: false,
             errored: false,
+            warned: false,
             reroute: false,
             chip: None,
             anim: None,

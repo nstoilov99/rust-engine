@@ -131,7 +131,8 @@ mod tests {
         assert!(graph.nodes.is_empty());
 
         let anim = node_graph_types::load_graph(&created(AssetType::AnimGraph)).expect("animgraph parses");
-        assert_eq!(anim.nodes.len(), 2);
+        // ENTRY + Idle in the machine, SM → Output on the pipeline (41.7).
+        assert_eq!(anim.nodes.len(), 4);
 
         let bs = parse_blend_space(&std::fs::read_to_string(created(AssetType::BlendSpace)).expect("read"))
             .expect("blend space parses");

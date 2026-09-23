@@ -162,6 +162,20 @@ impl Time {
         }
     }
 
+    /// Delta for systems that animate but must hold still while editing:
+    /// zero when paused or while the editor is in Edit mode (no
+    /// `EditorState` ⇒ standalone ⇒ real time). Animation plays only in
+    /// Play; in Edit the entry state's first frame is the posed preview.
+    pub fn playing_delta(resources: &Resources) -> f32 {
+        let editing = resources
+            .get::<EditorState>()
+            .is_some_and(|s| s.play_mode == PlayMode::Edit);
+        if editing {
+            return 0.0;
+        }
+        resources.get::<Time>().map(|t| t.scaled_delta()).unwrap_or(0.0)
+    }
+
     /// Advance time by one frame with the given raw delta.
     pub fn advance(&mut self, dt: f32) {
         self.delta = dt;

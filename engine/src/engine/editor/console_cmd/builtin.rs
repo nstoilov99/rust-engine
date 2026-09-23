@@ -179,4 +179,121 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     registry
         .register(Box::new(StatCommand))
         .expect("Failed to register StatCommand");
+    registry
+        .register(Box::new(AnimStatusCommand))
+        .expect("Failed to register AnimStatusCommand");
+}
+
+/// `anim.status` — one line per entity carrying an `AnimGraphRunner`: did it
+/// arm, is it evaluating, and has its palette left the bind pose. The
+/// answer to "why is this character in a T-pose" without a debugger or a
+/// terminal (Task 41.7 close-out diagnostic).
+pub struct AnimStatusCommand;
+
+impl ConsoleCommand for AnimStatusCommand {
+    fn meta(&self) -> CommandMeta {
+        CommandMeta {
+            name: "anim.status",
+            aliases: &["anim"],
+            description: "Show every animated entity's graph runtime state",
+            help: "Usage: anim.status\n\nFor each entity with an Anim Graph Runner: whether a runtime armed \
+                   (and why not), its evaluation gate, the machine's state, and how many palette \
+                   bones differ from the bind pose (0 = T-pose).",
+            args: &[],
+            category: "Debug",
+        }
+    }
+
+    fn execute(&self, ctx: &mut CommandContext, _args: &[&str]) -> CommandResult {
+        use crate::engine::animation::components::SkeletonInstance;
+        use crate::engine::animation::graph::{AnimGraphRunner, AnimGraphRuntime};
+        use crate::engine::ecs::components::Name;
+
+        let Some(world) = &ctx.world else {
+            return CommandResult::Error("World not available".to_string());
+        };
+        let mut lines = Vec::new();
+        for (entity, (runner, name, skel, rt)) in world
+            .query::<(
+                &AnimGraphRunner,
+                Option<&Name>,
+                Option<&SkeletonInstance>,
+                Option<&AnimGraphRuntime>,
+            )>()
+            .iter()
+        {
+            let who = name.map(|n| n.0.clone()).unwrap_or_else(|| format!("{entity:?}"));
+            let skel_line = match skel {
+                Some(s) => {
+                    let posed = s
+                        .palette
+                        .iter()
+                        .filter(|m| {
+                            (**m - glam::Mat4::IDENTITY)
+                                .abs()
+                                .to_cols_array()
+                                .iter()
+                                .any(|v| *v > 1e-4)
+                        })
+                        .count();
+                    let b0 = s.local_transforms.first();
+                    format!(
+                        "skeleton {} bones, revision {}, dirty {}, palette bones off bind pose: {}, \
+                         bone0 local t=({:.3},{:.3},{:.3}) r=({:.3},{:.3},{:.3},{:.3})",
+                        s.bones.len(),
+                        s.revision,
+                        s.dirty,
+                        posed,
+                        b0.map_or(0.0, |b| b.translation.x),
+                        b0.map_or(0.0, |b| b.translation.y),
+                        b0.map_or(0.0, |b| b.translation.z),
+                        b0.map_or(0.0, |b| b.rotation.x),
+                        b0.map_or(0.0, |b| b.rotation.y),
+                        b0.map_or(0.0, |b| b.rotation.z),
+                        b0.map_or(1.0, |b| b.rotation.w),
+                    )
+                }
+                None => "NO SkeletonInstance".to_string(),
+            };
+            let rt_line = match rt {
+                None => "NO runtime (not armed yet)".to_string(),
+                Some(rt) => match &rt.disabled {
+                    Some(why) => format!("REFUSED: {why}"),
+                    None => {
+                        let state = rt
+                            .plan
+                            .states
+                            .get(rt.machine.current_state())
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("?");
+                        let refs = rt.plan.clip_refs();
+                        let armed = refs.iter().filter(|r| rt.clips.contains_key(**r)).count();
+                        format!(
+                            "armed gen {}, state '{}', machine time {:.3}s, bucket {}, eval_this_frame {}, \
+                             pending_first {}, extra machines {}, masks {}, ik chains {}, clips armed {}/{}",
+                            rt.generation,
+                            state,
+                            rt.machine.time(),
+                            rt.throttle.bucket,
+                            rt.throttle.eval_this_frame,
+                            rt.throttle.pending_first_eval,
+                            rt.extra_machines.len(),
+                            rt.masks.len(),
+                            rt.ik.len(),
+                            armed,
+                            refs.len()
+                        )
+                    }
+                },
+            };
+            lines.push(format!(
+                "{who}: graph '{}' enabled {} | {skel_line} | {rt_line}",
+                runner.graph, runner.enabled
+            ));
+        }
+        if lines.is_empty() {
+            lines.push("No entity carries an Anim Graph Runner".to_string());
+        }
+        CommandResult::Output(lines)
+    }
 }

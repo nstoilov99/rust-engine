@@ -140,7 +140,8 @@ fn summary_body(ui: &mut Ui, state: &GraphEditorState, st: &Style) {
     read_row(ui, "File", &state.path, st, st.palette.text_mono);
     read_row(ui, "Nodes", &state.doc.nodes.len().to_string(), st, st.palette.text);
     read_row(ui, "Variables", &state.doc.variables.len().to_string(), st, st.palette.text);
-    let errors = state.errors.len() + state.domain_errors.len();
+    let errors = state.errors.len()
+        + state.domain_errors.iter().filter(|e| !e.warning).count();
     let err_col = if errors > 0 {
         Palette::invariant_status().error
     } else {
@@ -208,6 +209,18 @@ fn node_body(
         preview_mesh_row(ui, state, registry, cell, root, s, mesh_assets, auto_mesh, st);
         caption(ui, "Empty picks a mesh whose bones cover the graph's clips.", st);
         return;
+    }
+    // The inline State Machine (Task 41.7 D6) is the machine canvas's front
+    // door, so it says so and mirrors the ENTRY node's preview mesh as a
+    // second access point — the same property, edited on ENTRY. A nested
+    // State Machine previews with its own file's mesh, so it shows neither.
+    if state.is_inline_machine(n.id) {
+        read_row(ui, "Machine", "inline", st, st.palette.text_mono);
+        let row = ui.allocate(Vec2::new(ui.available().width(), st.metrics.control_height));
+        row_label(ui, row, "Preview Mesh", st);
+        let cell = Rect::from_min_max(Pos2::new(row.min.x + label_w, row.min.y), row.max);
+        preview_mesh_row(ui, state, registry, cell, root, s, mesh_assets, auto_mesh, st);
+        caption(ui, "Double-click the node (or PageDown) to enter the machine.", st);
     }
     // A state's or alias's Name: the only title the animation library
     // spells back to the user, so it gets a row (spec: Name / Clip / …).

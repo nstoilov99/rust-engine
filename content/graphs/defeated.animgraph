@@ -1,5 +1,5 @@
 (
-    version: 3,
+    version: 4,
     realm: Client,
     nodes: [
         (
@@ -51,6 +51,26 @@
             tint: None,
             title: None,
         ),
+        (
+            id: 4,
+            type_id: "anim_pipe_machine",
+            type_version: 1,
+            position: (0.0, 0.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+        (
+            id: 5,
+            type_id: "anim_pipe_output",
+            type_version: 1,
+            position: (260.0, 0.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
     ],
     edges: [
         (
@@ -69,6 +89,12 @@
             from_node: 3,
             from_pin: "to",
             to_node: 2,
+            to_pin: "in",
+        ),
+        (
+            from_node: 4,
+            from_pin: "pose",
+            to_node: 5,
             to_pin: "in",
         ),
     ],

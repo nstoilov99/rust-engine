@@ -27,14 +27,16 @@ use crate::engine::scripting::normalize_graph_path;
 use crate::engine::animation::blend_space::{parse_blend_space, BlendSpace};
 
 use super::machine::{
-    collect_anim_events, evaluate_pose, AnimEventFire, AnimMachine, AnimParams, PlayOnceSlot,
-    PoseScratch,
+    any_transition_activity, new_extra_machines, tick_extra_machines, tick_root_clocks,
+    AnimEventFire, AnimMachine, AnimParams, PipelineState, PlayOnceSlot, PoseScratch,
+    RootClipClock,
 };
 use crate::engine::animation::ik;
 
+use super::pipeline::upgrade_pipeline_root;
 use super::plan::{
-    compile_anim_graph_with, upgrade_any_state, AnimGraphLoader, AnimGraphPlan, PlanClip,
-    PlanIkSolver, PlanTree, PoseSource,
+    compile_anim_graph_with, upgrade_any_state, AnimGraphLoader, AnimGraphPlan, MachineSource,
+    PlanClip, PlanIkSolver, PlanMask, PlanPose, PlanTree, PoseSource,
 };
 
 // ---------------------------------------------------------------------------
@@ -393,7 +395,21 @@ pub struct AnimGraphRuntime {
     /// The asset this was compiled from (stale-detection against the runner).
     pub graph: String,
     pub plan: Arc<AnimGraphPlan>,
+    /// The inline machine (`plan.machines[plan.inline_machine]`) — the one
+    /// foot placement's `lock_state`, the preview mirror and the editor's
+    /// live viz read.
     pub machine: AnimMachine,
+    /// Task 41.7: the pipeline-nested State Machine nodes' own instances,
+    /// index-aligned with `plan.machines` minus the inline entry
+    /// (`extra_machines[k]` ↔ `plan.machines[k]` for `k < inline_machine`,
+    /// `plan.machines[k + 1]` after it — [`super::machine::extra_machine_index`]).
+    pub extra_machines: Vec<AnimMachine>,
+    /// One clock per `plan.root_clips`, looping, advanced by `dt × speed`.
+    pub root_clocks: Vec<RootClipClock>,
+    /// Per-bone weights of every Layer / masked Play Once, keyed by node id,
+    /// resolved against this entity's skeleton at arm time (serial, beside
+    /// the IK chains). A mask root missing on the skeleton refuses the arm.
+    pub masks: BTreeMap<u64, Vec<f32>>,
     /// The play-once override channel (started through Trigger parameters).
     pub slot: PlayOnceSlot,
     /// Gameplay's write surface (ADR 0002): parameters in, never states.
@@ -577,6 +593,7 @@ impl AnimGraphLoader for DiskAnimAssets {
     fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
         let mut doc = self.load_graph(content_rel)?;
         upgrade_any_state(&mut doc);
+        upgrade_pipeline_root(&mut doc);
         Some(doc)
     }
 
@@ -662,6 +679,9 @@ impl AnimGraphLoader for ArmLoader<'_> {
     fn graph(&self, content_rel: &str) -> Option<GraphDoc> {
         let mut doc = self.assets.load_graph(content_rel)?;
         upgrade_any_state(&mut doc);
+        // In memory only (D5): a pre-41.7 nested file gets its implicit
+        // pipeline root here, exactly as the compiler would synthesise it.
+        upgrade_pipeline_root(&mut doc);
         Some(doc)
     }
 
@@ -847,6 +867,23 @@ thread_local! {
         std::cell::RefCell::new(PoseScratch::new());
 }
 
+/// Park an animation refusal (`error`) or compile warning in the graph log
+/// sink, if the host has one — the editor drains it into its Console each
+/// frame. The terminal `println!` stays; this is the copy an author can see
+/// without a terminal.
+#[cfg(feature = "graph-scripting")]
+fn sink_line(resources: &mut Resources, graph: &str, entity: &str, text: String, error: bool) {
+    use crate::engine::scripting::{GraphLogEntry, GraphLogSink};
+    if let Some(sink) = resources.get_mut::<GraphLogSink>() {
+        let level = if error {
+            node_graph_exec::LogLevel::Error
+        } else {
+            node_graph_exec::LogLevel::Warning
+        };
+        sink.push(GraphLogEntry::new(level, graph, entity, text));
+    }
+}
+
 impl AnimGraphSystem {
     pub fn new(loader: Box<dyn AnimAssetLoader + Send + Sync>) -> Self {
         Self {
@@ -868,6 +905,7 @@ impl AnimGraphSystem {
     /// Compile (or reuse) the plan and build a fresh runtime sitting in the
     /// entry state. Every refusal lands in `disabled` rather than panicking.
     fn arm(&self, graph: &str, generation: u64, resources: &mut Resources) -> AnimGraphRuntime {
+        // (see `sink_line` for where refusals and warnings surface)
         debug_assert!(
             !self.evaluating.load(std::sync::atomic::Ordering::Relaxed),
             "arm() must never run inside the parallel evaluation section"
@@ -876,6 +914,9 @@ impl AnimGraphSystem {
             graph: graph.to_string(),
             plan: Arc::new(AnimGraphPlan::default()),
             machine: AnimMachine::new(&AnimGraphPlan::default()),
+            extra_machines: Vec::new(),
+            root_clocks: Vec::new(),
+            masks: BTreeMap::new(),
             slot: PlayOnceSlot::new(),
             params: AnimParams::default(),
             events: Vec::new(),
@@ -903,13 +944,25 @@ impl AnimGraphSystem {
                     assets: &*self.loader,
                     spaces: std::cell::RefCell::new(resources.get_mut::<BlendSpaceCache>()),
                 };
+                // Once per compile (the cache holds the plan), so an
+                // ignored pipeline node or a lifted nested chain is said out
+                // loud without spamming every entity.
+                let mut warnings: Vec<String> = Vec::new();
                 let compiled = self
                     .loader
                     .load_graph(graph)
                     .ok_or_else(|| format!("'{graph}' could not be loaded"))
                     .and_then(|doc| compile_anim_graph_with(&doc, graph, &load))
-                    .map(Arc::new);
+                    .map(|c| {
+                        warnings.extend(c.warnings.iter().map(|w| w.message.clone()));
+                        Arc::new(c.plan)
+                    });
                 drop(load);
+                for w in warnings {
+                    eprintln!("animgraph '{graph}': warning: {w}");
+                    #[cfg(feature = "graph-scripting")]
+                    sink_line(resources, graph, "-", w, false);
+                }
                 if let Some(cache) = resources.get_mut::<AnimGraphPlanCache>() {
                     cache.store(graph, compiled.clone());
                 }
@@ -923,45 +976,31 @@ impl AnimGraphSystem {
 
         // Clips load with the plan, not per frame — and a state whose clip is
         // missing refuses here, against the state's name, instead of playing
-        // a frozen pose with no explanation.
-        if let Some(clips) = resources.get_mut::<AnimClipCache>() {
-            clips.prefetch(&plan.clip_refs(), &*self.loader);
+        // a frozen pose with no explanation. A host world without the clip
+        // cache at all refuses the same way: silently arming against nothing
+        // left every character of a scene tab in a T-pose (Task 41.7).
+        match resources.get_mut::<AnimClipCache>() {
+            Some(clips) => clips.prefetch(&plan.clip_refs(), &*self.loader),
+            None => {
+                return refused(format!(
+                    "{graph}: the host world has no AnimClipCache resource — nothing can animate"
+                ))
+            }
         }
         if let Some(clips) = resources.get::<AnimClipCache>() {
             let none = BTreeMap::new();
             let clip_of = |c: &PlanClip| clip_of(&none, clips, c);
-            for st in &plan.states {
-                // A blend space names its samples by index, so its refusal
-                // says which sample to fix.
-                if let PoseSource::Tree(PlanTree::Space(sp)) = &st.source {
-                    if let Some((i, (c, _))) = sp
-                        .samples
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (c, _))| clip_of(c).is_none())
-                    {
-                        return refused(format!(
-                            "{graph}: state '{}': blend space sample {i} clip '{}' could not \
-                             be loaded",
-                            st.name, c.clip
-                        ));
-                    }
-                }
-                for c in st.source.clips() {
-                    if clip_of(c).is_none() {
-                        return refused(format!(
-                            "{graph}: state '{}': clip '{}' could not be loaded",
-                            st.name, c.clip
-                        ));
-                    }
-                }
+            if let Err(why) = check_clips(&plan, &clip_of) {
+                return refused(format!("{graph}: {why}"));
             }
-            for slot in &plan.slots {
-                if clip_of(&slot.clip).is_none() {
-                    return refused(format!(
-                        "{graph}: play-once slot '{}': clip '{}' could not be loaded",
-                        slot.name, slot.clip.clip
-                    ));
+            // Pipeline-nested machines are their own instances: their
+            // states' clips are checked the same way, against their own
+            // state names.
+            for m in &plan.machines {
+                if let MachineSource::Nested { plan: nested, .. } = &m.source {
+                    if let Err(why) = check_clips(nested, &clip_of) {
+                        return refused(format!("{graph}: {why}"));
+                    }
                 }
             }
         }
@@ -969,6 +1008,9 @@ impl AnimGraphSystem {
         AnimGraphRuntime {
             graph: graph.to_string(),
             machine: AnimMachine::new(&plan),
+            extra_machines: new_extra_machines(&plan),
+            root_clocks: vec![RootClipClock::default(); plan.root_clips.len()],
+            masks: BTreeMap::new(),
             slot: PlayOnceSlot::new(),
             params: AnimParams::from_decls(&plan.parameters),
             events: Vec::new(),
@@ -982,6 +1024,135 @@ impl AnimGraphSystem {
             clips: Default::default(),
         }
     }
+}
+
+/// Every clip a plan's own states, slots and root clips name must have
+/// loaded — a missing one refuses here, against the node that named it,
+/// instead of playing a frozen pose with no explanation.
+fn check_clips<'a, F>(plan: &AnimGraphPlan, clip_of: &F) -> Result<(), String>
+where
+    F: Fn(&PlanClip) -> Option<&'a RawAnimationClip>,
+{
+    for st in &plan.states {
+        // A blend space names its samples by index, so its refusal says
+        // which sample to fix.
+        if let PoseSource::Tree(PlanTree::Space(sp)) = &st.source {
+            if let Some((i, (c, _))) = sp
+                .samples
+                .iter()
+                .enumerate()
+                .find(|(_, (c, _))| clip_of(c).is_none())
+            {
+                return Err(format!(
+                    "state '{}': blend space sample {i} clip '{}' could not be loaded",
+                    st.name, c.clip
+                ));
+            }
+        }
+        for c in st.source.clips() {
+            if clip_of(c).is_none() {
+                return Err(format!(
+                    "state '{}': clip '{}' could not be loaded",
+                    st.name, c.clip
+                ));
+            }
+        }
+    }
+    for slot in &plan.slots {
+        if clip_of(&slot.clip).is_none() {
+            return Err(format!(
+                "play-once slot '{}': clip '{}' could not be loaded",
+                slot.name, slot.clip.clip
+            ));
+        }
+    }
+    for rc in &plan.root_clips {
+        if clip_of(&rc.clip).is_none() {
+            return Err(format!(
+                "clip #{}: clip '{}' could not be loaded",
+                rc.node_id, rc.clip.clip
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Task 41.7: resolve every Layer / masked Play Once mask of the pipeline
+/// against an entity's skeleton — 1 on each listed root (unless the Layer
+/// says `include_root: false`) and every descendant, 0 elsewhere; roots
+/// union (so under `include_root: false` a listed root still counts when
+/// another listed root is its ancestor). A root missing on the skeleton
+/// refuses, anchored on the node (the message carries its id; a slot also
+/// its name). A mask covering no bone at all is said out loud, once per
+/// arm. Serial: runs beside [`arm_ik_chains`], never on a worker. Pub so
+/// the preview panel can arm its own masks the same way.
+pub fn arm_masks(
+    plan: &AnimGraphPlan,
+    skeleton: &SkeletonInstance,
+) -> Result<BTreeMap<u64, Vec<f32>>, String> {
+    fn walk<'p>(pose: &'p PlanPose, out: &mut Vec<(u64, &'p PlanMask, String)>, plan: &AnimGraphPlan) {
+        match pose {
+            PlanPose::Machine(_) | PlanPose::Clip(_) => {}
+            PlanPose::Layer {
+                base,
+                layer,
+                mask,
+                node_id,
+                ..
+            } => {
+                out.push((*node_id, mask, format!("layer #{node_id}")));
+                walk(base, out, plan);
+                walk(layer, out, plan);
+            }
+            PlanPose::Overlay {
+                input,
+                slot,
+                mask,
+                node_id,
+            } => {
+                if let Some(m) = mask {
+                    let name = plan.slots.get(*slot).map_or_else(
+                        || format!("Slot {node_id}"),
+                        |s| s.name.clone(),
+                    );
+                    out.push((*node_id, m, format!("play-once slot '{name}' (#{node_id})")));
+                }
+                walk(input, out, plan);
+            }
+        }
+    }
+    let mut masked = Vec::new();
+    walk(&plan.pipeline.root, &mut masked, plan);
+    let bones = &skeleton.bones;
+    let mut out = BTreeMap::new();
+    for (node_id, mask, who) in masked {
+        let mut roots = Vec::with_capacity(mask.roots.len());
+        for r in &mask.roots {
+            roots.push(bones.iter().position(|b| b.name == *r).ok_or_else(|| {
+                format!("{who}: bone '{r}' is not in the skeleton")
+            })?);
+        }
+        let weights: Vec<f32> = (0..bones.len())
+            .map(|i| {
+                if mask.include_root && roots.contains(&i) {
+                    return 1.0;
+                }
+                let mut p = bones[i].parent_index;
+                while let Some(j) = p {
+                    if roots.contains(&j) {
+                        return 1.0;
+                    }
+                    p = bones[j].parent_index;
+                }
+                0.0
+            })
+            .collect();
+        if weights.iter().all(|w| *w <= 0.0) {
+            eprintln!("[animgraph] warning: {who}: its mask covers no bone on this skeleton");
+        }
+        out.insert(node_id, weights);
+    }
+    Ok(out)
 }
 
 /// Task 41.6 D7: every clip set the plan samples, armed against `bones`
@@ -1109,34 +1280,49 @@ fn tick_entity(
     let clip_for = |c: &PlanClip| clip_of(&armed, clips, c);
     // Checked before the tick too, so the frame a crossfade *completes* on
     // still evaluates (the fade is dropped inside `tick`).
-    let fading_before = rt.machine.crossfade().is_some();
+    let fading_before = rt.machine.crossfade().is_some()
+        || rt.extra_machines.iter().any(|m| m.crossfade().is_some());
+    // Tick order = trigger consumption order (published, Task 41.7): the
+    // inline machine's transitions first, then the extra machines in
+    // `plan.machines` order, then the root clip clocks (consume nothing),
+    // then the play-once slot in the pipeline's wire order.
     rt.machine.tick(&plan, &mut rt.params, dt);
+    tick_extra_machines(&plan, &mut rt.extra_machines, &mut rt.params, dt);
+    tick_root_clocks(&plan, &mut rt.root_clocks, dt);
     rt.slot.tick(&plan, &mut rt.params, dt, &clip_for);
+    // Events: cleared once per tick, then every source appends through the
+    // pipeline walk (the U1 ownership contract lives in `collect_events`).
+    let state = PipelineState {
+        plan: &plan,
+        machine: &rt.machine,
+        extra_machines: &rt.extra_machines,
+        root_clocks: &rt.root_clocks,
+        masks: &rt.masks,
+        slot: &rt.slot,
+        params: &rt.params,
+    };
     let mut events = std::mem::take(&mut rt.events);
-    collect_anim_events(&rt.machine, &rt.slot, &plan, &rt.params, clip_for, &mut events);
+    events.clear();
+    state.collect_events(&clip_for, &mut events);
     rt.events = events;
     // Tick-local forced-eval sources (S-D4): an active or just-completed
-    // crossfade, a transition fired this tick, an active play-once, or an
-    // event fired this tick. All visible on `rt` right here — they override
-    // a pre-pass "skip" without touching shared state. (The serial-side
-    // forces — first visible frame, first frame after arming, the external
-    // IK hook — already landed in `eval_this_frame`.)
+    // crossfade, a transition fired this tick (any machine of the
+    // pipeline), an active play-once, or an event fired this tick. All
+    // visible on `rt` right here — they override a pre-pass "skip" without
+    // touching shared state. (The serial-side forces — first visible frame,
+    // first frame after arming, the external IK hook — already landed in
+    // `eval_this_frame`.)
     let force = fading_before
-        || rt.machine.transition_activity()
+        || any_transition_activity(&rt.machine, &rt.extra_machines)
         || rt.slot.playing().is_some()
         || !rt.events.is_empty();
     if !rt.throttle.eval_this_frame && !force {
         return false; // held pose: skeleton keeps its last palette + revision
     }
-    evaluate_pose(
-        &rt.machine,
-        &plan,
-        &rt.params,
-        clip_for,
-        &mut skeleton.local_transforms,
-        scratch,
-    );
-    rt.slot.apply(&plan, &clip_for, &mut skeleton.local_transforms, scratch);
+    // The local-space stage: machines, root clips, layers and overlays in
+    // the compiled pipeline's shape (a pre-41.7 document reduces to
+    // machine → whole-body overlay, bit for bit).
+    state.evaluate(&clip_for, &mut skeleton.local_transforms, scratch, 0);
     // FK phase 1, the IK stage (Task 41.5 P5) over the retained model space,
     // then phase 2 — one palette refresh however many chains ran. Sitting
     // inside the eval gate means IK follows the same rate as the pose it
@@ -1152,9 +1338,10 @@ fn tick_entity(
 /// and a positive weight, solve in the mesh's Y-up model space, blend
 /// solved vs animated by the weight parameter, write the chain bones'
 /// corrected matrices and re-walk their descendants (P2 caveat: FK phase 2
-/// never auto-updates them). Chains apply in plan order, each seeing the
-/// previous one's result. Runs on rayon workers — everything it touches is
-/// this entity's own state.
+/// never auto-updates them). Chains apply in the pipeline's wire order
+/// (`plan.pipeline.ik_order`; index order for a hand-built plan without
+/// one), each seeing the previous one's result. Runs on rayon workers —
+/// everything it touches is this entity's own state.
 ///
 /// Weight-blend ruling: per edited bone on the model-space decomposition —
 /// slerp rotation, lerp translation, animated scale kept ([`ik::blend_model`]).
@@ -1216,7 +1403,13 @@ fn apply_ik(rt: &mut AnimGraphRuntime, skeleton: &mut SkeletonInstance) {
         }
     }
     let params = &rt.params;
-    for chain in &mut rt.ik {
+    // Compiled wire order; index order only for hand-built plans (R13). A
+    // compiled plan whose IK Chain nodes are all unreachable has an empty
+    // order and must solve nothing (they carry the "not connected" warning).
+    let n = rt.plan.pipeline.ik_count(rt.ik.len());
+    for k in 0..n {
+        let i = rt.plan.pipeline.ik_index(k);
+        let Some(chain) = rt.ik.get_mut(i) else { continue };
         let weight = params
             .get_float(&chain.weight_param)
             .unwrap_or(0.0)
@@ -1340,10 +1533,7 @@ impl System for AnimGraphSystem {
     fn run(&mut self, world: &mut hecs::World, resources: &mut Resources) {
         crate::profile_scope!("anim_graph");
 
-        let dt = resources
-            .get::<Time>()
-            .map(|t| t.scaled_delta())
-            .unwrap_or(0.0);
+        let dt = Time::playing_delta(resources);
         let generation = resources
             .get::<AnimGraphPlanCache>()
             .map(|c| c.generation())
@@ -1417,6 +1607,16 @@ impl System for AnimGraphSystem {
                     }
                 }
             }
+            // Task 41.7: Layer / masked Play Once masks resolve against the
+            // same skeleton, with the same refusal shape.
+            if runtime.disabled.is_none() {
+                if let Ok(skel) = world.get::<&SkeletonInstance>(entity) {
+                    match arm_masks(&runtime.plan, &skel) {
+                        Ok(masks) => runtime.masks = masks,
+                        Err(why) => runtime.disabled = Some(format!("{graph}: {why}")),
+                    }
+                }
+            }
 
             // Task 41.6 D7: clip sets whose bone table differs from this
             // skeleton's get by-name remapped copies (once per pair).
@@ -1431,9 +1631,20 @@ impl System for AnimGraphSystem {
             }
 
             // Arm-time refusals print once — arming only happens when there
-            // is no runtime, so this cannot repeat per frame.
+            // is no runtime, so this cannot repeat per frame. They also go
+            // to the graph log sink when the host has one, so the editor's
+            // Console shows them: a T-posed character whose reason lives only
+            // in the terminal is not diagnosable from inside the editor.
             if let Some(why) = &runtime.disabled {
                 println!("[animgraph] {entity:?} will not animate — {why}");
+                #[cfg(feature = "graph-scripting")]
+                {
+                    let who = world
+                        .get::<&crate::engine::ecs::components::Name>(entity)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|_| format!("{entity:?}"));
+                    sink_line(resources, &graph, &who, format!("will not animate — {why}"), true);
+                }
             }
             let _ = world.insert_one(entity, runtime);
         }

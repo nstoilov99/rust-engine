@@ -4,8 +4,9 @@
 //!
 //! The focused `.animgraph` document compiles through the real compiler and
 //! the disk loader (nested graphs and blend spaces resolve exactly as the
-//! runtime's do), and runs through the same [`AnimMachine`] +
-//! [`evaluate_pose`] an entity would — on a skeleton of the panel's own, so
+//! runtime's do), and runs through the same machines, root clip clocks,
+//! play-once slot and [`PipelineState`] evaluator an entity would (Task
+//! 41.7: one evaluator, two hosts) — on a skeleton of the panel's own, so
 //! the world is never touched. The panel owns the blackboard: the graph
 //! tab's preview strip drives it when nothing in the world is bound. When
 //! a world entity *is* bound the strip keeps driving that runtime and the
@@ -16,7 +17,7 @@
 //! passes the document's `revision`, and the plan rebuilds only when that
 //! moved — a parameter write never restarts the machine.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,9 +29,10 @@ use super::mesh_editor::MeshPreviewState;
 use crate::engine::animation::components::SkeletonInstance;
 use crate::engine::animation::graph::plan::preview_mesh_of;
 use crate::engine::animation::graph::{
-    compile_anim_graph_with, evaluate_pose, AnimAssetLoader, AnimGraphLoader, AnimGraphPlan,
-    AnimMachine, AnimParamType, AnimParams, ClipSet, DiskAnimAssets, PlanClip, PoseScratch,
-    PoseSource,
+    arm_masks, compile_anim_graph_with, new_extra_machines, tick_extra_machines,
+    tick_root_clocks, AnimAssetLoader, AnimGraphLoader, AnimGraphPlan, AnimGraphRuntime,
+    AnimMachine, AnimParamType, AnimParams, ClipSet, DiskAnimAssets, MachineSource,
+    PipelineState, PlanClip, PlayOnceSlot, PoseScratch, PoseSource, RootClipClock,
 };
 
 /// What the strip's chip calls the panel's own machine.
@@ -38,12 +40,36 @@ pub const PANEL_INSTANCE_NAME: &str = "Preview panel";
 
 /// A bound world runtime, copied for one frame: the pane poses the preview
 /// mesh with exactly what the entity shows, and ticks nothing of its own.
+/// Masks are not copied — they are per skeleton, and the panel arms the
+/// mirrored plan's against its own.
 pub struct Mirror {
     /// The entity's display name, for the overlay.
     pub name: String,
     pub plan: Arc<AnimGraphPlan>,
+    /// The inline machine.
     pub machine: AnimMachine,
+    /// Pipeline-nested machines and root clip clocks, as the runtime holds
+    /// them (see [`new_extra_machines`] for the index mapping).
+    pub extra_machines: Vec<AnimMachine>,
+    pub root_clocks: Vec<RootClipClock>,
+    pub slot: PlayOnceSlot,
     pub params: AnimParams,
+}
+
+impl Mirror {
+    /// Snapshot an armed runtime under `name` — what the host does each
+    /// frame for the entity the strip is bound to.
+    pub fn of_runtime(name: String, rt: &AnimGraphRuntime) -> Self {
+        Self {
+            name,
+            plan: rt.plan.clone(),
+            machine: rt.machine.clone(),
+            extra_machines: rt.extra_machines.clone(),
+            root_clocks: rt.root_clocks.clone(),
+            slot: rt.slot.clone(),
+            params: rt.params.clone(),
+        }
+    }
 }
 
 pub struct AnimGraphPreview {
@@ -73,7 +99,16 @@ pub struct AnimGraphPreview {
     compile_error: Option<String>,
     /// The document named a mesh (as opposed to auto-pick) — for the message.
     mesh_chosen: bool,
+    /// The panel's own pipeline state: the inline machine, the
+    /// pipeline-nested machines, the root clip clocks and the play-once
+    /// channel — restarted together when the plan changes.
     machine: AnimMachine,
+    extra_machines: Vec<AnimMachine>,
+    root_clocks: Vec<RootClipClock>,
+    slot: PlayOnceSlot,
+    /// Layer / masked Play Once masks of the plan being posed (the mirror's
+    /// while mirroring), resolved against the panel's skeleton.
+    masks: BTreeMap<u64, Vec<f32>>,
     params: AnimParams,
     scratch: PoseScratch,
     compiled_revision: Option<u64>,
@@ -97,6 +132,10 @@ impl Default for AnimGraphPreview {
             clips: HashMap::new(),
             mesh_bones: HashMap::new(),
             machine: AnimMachine::new(&plan),
+            extra_machines: Vec::new(),
+            root_clocks: Vec::new(),
+            slot: PlayOnceSlot::new(),
+            masks: BTreeMap::new(),
             plan,
             compile_error: None,
             mesh_chosen: false,
@@ -207,7 +246,13 @@ impl AnimGraphPreview {
                 self.ensure_clips(plan, assets);
                 arm_clips_to_skeleton(&mut self.clips, self.skeleton.as_ref());
             }
-            self.status = self.diagnose();
+            match self.diagnose() {
+                Ok(masks) => {
+                    self.masks = masks;
+                    self.status = None;
+                }
+                Err(why) => self.status = Some(why),
+            }
             self.diagnosed_mirror = mirror_plan;
         }
         self.advance(dt);
@@ -230,7 +275,7 @@ impl AnimGraphPreview {
         graphs: &dyn AnimGraphLoader,
     ) {
         let plan = match compile_anim_graph_with(doc, path, graphs) {
-            Ok(p) => Arc::new(p),
+            Ok(c) => Arc::new(c.plan),
             Err(e) => {
                 self.compile_error = Some(e);
                 return;
@@ -278,6 +323,9 @@ impl AnimGraphPreview {
                 }
             }
             self.machine = AnimMachine::new(&plan);
+            self.extra_machines = new_extra_machines(&plan);
+            self.root_clocks = vec![RootClipClock::default(); plan.root_clips.len()];
+            self.slot = PlayOnceSlot::new();
             self.params = params;
             self.plan = plan;
         }
@@ -328,64 +376,64 @@ impl AnimGraphPreview {
             .cloned()
     }
 
-    /// Why the pane cannot draw, in the order a user would fix things. A
+    /// Why the pane cannot draw, in the order a user would fix things — or,
+    /// when it can, the posed plan's masks armed against the panel's
+    /// skeleton (a mask root the skeleton lacks refuses like a clip
+    /// mismatch does, anchored on the node as the runtime's message is). A
     /// mirrored runtime runs its own (already compiled) plan, so the
     /// document's refusal does not stop the pane showing what the entity
     /// does; the mesh still has to fit.
-    fn diagnose(&self) -> Option<String> {
+    fn diagnose(&self) -> Result<BTreeMap<u64, Vec<f32>>, String> {
         let plan: &AnimGraphPlan = match &self.mirror {
             Some(m) => &m.plan,
             None => {
                 if let Some(e) = &self.compile_error {
-                    return Some(e.clone());
+                    return Err(e.clone());
                 }
                 &self.plan
             }
         };
         let Some(mesh) = &self.mesh else {
-            return Some(if self.mesh_chosen {
+            return Err(if self.mesh_chosen {
                 "Set Preview Mesh".into()
             } else {
                 "No skinned mesh matches this graph's clips \u{2014} set Preview Mesh".into()
             });
         };
         let Some(skel) = &self.skeleton else {
-            return Some(format!("{} has no skeleton \u{2014} set Preview Mesh", stem(mesh)));
+            return Err(format!("{} has no skeleton \u{2014} set Preview Mesh", stem(mesh)));
         };
         if plan.states.is_empty() {
-            return Some("Graph has no states".into());
+            return Err("Graph has no states".into());
         }
         let mesh_bones: Vec<String> = skel.bones.iter().map(|b| b.name.clone()).collect();
-        let refs = plan
-            .states
-            .iter()
-            .flat_map(|s| s.source.clips())
-            .chain(plan.slots.iter().map(|s| &s.clip));
-        for c in refs {
+        for c in sampled_clips(plan) {
             let Some(set) = self.clips.get(&c.clip).and_then(Option::as_ref) else {
-                return Some(format!("clip '{}' could not be loaded", c.clip));
+                return Err(format!("clip '{}' could not be loaded", c.clip));
             };
             if set.select(c.clip_name.as_deref()).is_none() {
-                return Some(format!(
+                return Err(format!(
                     "clip '{}' not in {}",
                     c.clip_name.clone().unwrap_or_default(),
                     c.clip
                 ));
             }
             if !bones_cover(&mesh_bones, &set.bone_names) {
-                return Some(format!(
+                return Err(format!(
                     "{} bones don't match {}'s skeleton \u{2014} set Preview Mesh",
                     stem(&c.clip),
                     stem(mesh)
                 ));
             }
         }
-        None
+        arm_masks(plan, skel)
     }
 
-    /// Evaluate one frame: the panel's machine ticks by `dt` while playing
-    /// (paused ticks with `dt = 0`, the runtime's own frozen frame), or the
-    /// mirror poses as-is; then the pose and palette refresh.
+    /// Evaluate one frame: the panel's own pipeline ticks by `dt` while
+    /// playing (paused ticks with `dt = 0`, the runtime's own frozen frame)
+    /// in the runtime's order — inline machine, extra machines, root clip
+    /// clocks, then the slot — or the mirror poses as-is; then the pipeline
+    /// evaluates through [`PipelineState`] and the palette refreshes.
     pub fn advance(&mut self, dt: f32) {
         let Some(skel) = self.skeleton.as_mut() else { return };
         if self.status.is_some() {
@@ -394,33 +442,55 @@ impl AnimGraphPreview {
         let clips = &self.clips;
         let clip_for =
             |c: &PlanClip| clips.get(&c.clip)?.as_ref()?.select(c.clip_name.as_deref());
-        match &self.mirror {
-            Some(m) => evaluate_pose(
-                &m.machine,
-                &m.plan,
-                &m.params,
-                clip_for,
-                &mut skel.local_transforms,
-                &mut self.scratch,
-            ),
+        let state = match &self.mirror {
+            Some(m) => PipelineState {
+                plan: &m.plan,
+                machine: &m.machine,
+                extra_machines: &m.extra_machines,
+                root_clocks: &m.root_clocks,
+                masks: &self.masks,
+                slot: &m.slot,
+                params: &m.params,
+            },
             None => {
-                self.machine.tick(
-                    &self.plan,
-                    &mut self.params,
-                    if self.playing { dt } else { 0.0 },
-                );
-                evaluate_pose(
-                    &self.machine,
-                    &self.plan,
-                    &self.params,
-                    clip_for,
-                    &mut skel.local_transforms,
-                    &mut self.scratch,
-                );
+                let dt = if self.playing { dt } else { 0.0 };
+                self.machine.tick(&self.plan, &mut self.params, dt);
+                tick_extra_machines(&self.plan, &mut self.extra_machines, &mut self.params, dt);
+                tick_root_clocks(&self.plan, &mut self.root_clocks, dt);
+                self.slot.tick(&self.plan, &mut self.params, dt, &clip_for);
+                PipelineState {
+                    plan: &self.plan,
+                    machine: &self.machine,
+                    extra_machines: &self.extra_machines,
+                    root_clocks: &self.root_clocks,
+                    masks: &self.masks,
+                    slot: &self.slot,
+                    params: &self.params,
+                }
             }
-        }
+        };
+        state.evaluate(&clip_for, &mut skel.local_transforms, &mut self.scratch, 0);
         skel.compute_palette();
     }
+}
+
+/// Every clip reference the pipeline samples: the inline machine's states,
+/// the slots (lifted ones included), the root clips and the pipeline-nested
+/// machines' states.
+fn sampled_clips(plan: &AnimGraphPlan) -> Vec<&PlanClip> {
+    let mut out: Vec<&PlanClip> = plan
+        .states
+        .iter()
+        .flat_map(|s| s.source.clips())
+        .chain(plan.slots.iter().map(|s| &s.clip))
+        .chain(plan.root_clips.iter().map(|c| &c.clip))
+        .collect();
+    for m in &plan.machines {
+        if let MachineSource::Nested { plan: child, .. } = &m.source {
+            out.extend(child.states.iter().flat_map(|s| s.source.clips()));
+        }
+    }
+    out
 }
 
 /// `Idle`, `Idle → Walk` mid-fade, `Locomotion / Run` inside a nested state.
@@ -538,11 +608,16 @@ mod tests {
 
     /// Bone 0 holds x = `x` for the whole 1 s cycle.
     fn clip(name: &str, x: f32) -> RawAnimationClip {
+        clip_on(0, name, x)
+    }
+
+    /// Bone `bone` holds x = `x` for the whole 1 s cycle.
+    fn clip_on(bone: usize, name: &str, x: f32) -> RawAnimationClip {
         RawAnimationClip {
             name: name.into(),
             duration_seconds: 1.0,
             channels: vec![AnimationChannel {
-                bone_index: 0,
+                bone_index: bone,
                 position_keys: vec![(0.0, Vec3::new(x, 0.0, 0.0)), (1.0, Vec3::new(x, 0.0, 0.0))],
                 rotation_keys: vec![],
                 scale_keys: vec![],
@@ -558,16 +633,18 @@ mod tests {
             None
         }
         fn load_clips(&self, rel: &str) -> Option<ClipSet> {
-            let (name, x) = match rel {
-                "idle.anim" => ("Idle", 2.0),
-                "walk.anim" => ("Walk", 10.0),
+            let clip = match rel {
+                "idle.anim" => clip("Idle", 2.0),
+                "walk.anim" => clip("Walk", 10.0),
+                // The layer clip keys `child` only.
+                "upper.anim" => clip_on(1, "Upper", 7.0),
                 _ => return None,
             };
-            Some(ClipSet { bone_names: vec!["root".into(), "child".into()], clips: vec![clip(name, x)] })
+            Some(ClipSet { bone_names: vec!["root".into(), "child".into()], clips: vec![clip] })
         }
         fn load_skeleton(&self, rel: &str) -> Option<Vec<BoneData>> {
             match rel {
-                "a.mesh" => Some(bones(&["root"])),
+                "a.mesh" => Some(bones(&["other"])),
                 "b.mesh" => Some(bones(&["root", "child"])),
                 "c.mesh" => Some(vec![]),
                 _ => None,
@@ -590,7 +667,50 @@ mod tests {
     }
 
     fn bone0_x(p: &AnimGraphPreview) -> f32 {
-        p.skeleton.as_ref().expect("skeleton").local_transforms[0].translation.x
+        bone_x(p, 0)
+    }
+
+    fn bone_x(p: &AnimGraphPreview, i: usize) -> f32 {
+        p.skeleton.as_ref().expect("skeleton").local_transforms[i].translation.x
+    }
+
+    /// [`two_state_doc`] plus the pipeline `SM(20) ─base▶ Layer(22: bones,
+    /// weight aim) ◀layer─ Clip(21: upper.anim) → Output(25)`.
+    fn layer_doc(bones: &str) -> GraphDoc {
+        use crate::engine::animation::graph::{
+            ANIM_PIPE_LAYER_TYPE_ID, ANIM_PIPE_MACHINE_TYPE_ID, ANIM_PIPE_OUTPUT_TYPE_ID,
+            LAYER_BASE_PIN, LAYER_LAYER_PIN, LAYER_WEIGHT_PARAM_PROP, MASK_BONES_PROP,
+            PIPE_IN_PIN,
+        };
+        use crate::engine::animation::graph::plan::{ANIM_CLIP_TYPE_ID, POSE_PIN};
+        let mut doc = two_state_doc();
+        doc.variables.push(VarDecl {
+            slug: "aim".into(),
+            label: "Aim".into(),
+            ty: PinType::Float,
+            default: Some(PropValue::Float(0.0)),
+            group: None,
+        });
+        doc.nodes.extend([
+            node(20, ANIM_PIPE_MACHINE_TYPE_ID, None),
+            with(21, ANIM_CLIP_TYPE_ID, Some("Upper"), &[(CLIP_PROP, PropValue::Asset("upper.anim".into()))]),
+            with(
+                22,
+                ANIM_PIPE_LAYER_TYPE_ID,
+                Some("Aim"),
+                &[
+                    (MASK_BONES_PROP, PropValue::Str(bones.into())),
+                    (LAYER_WEIGHT_PARAM_PROP, PropValue::Str("aim".into())),
+                ],
+            ),
+            node(25, ANIM_PIPE_OUTPUT_TYPE_ID, None),
+        ]);
+        doc.edges.extend([
+            edge(20, POSE_PIN, 22, LAYER_BASE_PIN),
+            edge(21, POSE_PIN, 22, LAYER_LAYER_PIN),
+            edge(22, POSE_PIN, 25, PIPE_IN_PIN),
+        ]);
+        doc
     }
 
     #[test]
@@ -717,7 +837,15 @@ mod tests {
         // The transition fires on the first tick; the fade runs on the next.
         machine.tick(&plan, &mut params, 0.1);
         machine.tick(&plan, &mut params, 1.0);
-        p.mirror = Some(Mirror { name: "Hero".into(), plan, machine, params });
+        p.mirror = Some(Mirror {
+            name: "Hero".into(),
+            plan,
+            machine,
+            extra_machines: Vec::new(),
+            root_clocks: Vec::new(),
+            slot: PlayOnceSlot::new(),
+            params,
+        });
         tick(&mut p, &doc, 1, 0.1);
         assert_eq!(p.state_label().as_deref(), Some("Walk"));
         assert!((bone0_x(&p) - 10.0).abs() < 1e-4, "the entity's pose, not the panel's");
@@ -725,6 +853,37 @@ mod tests {
         p.mirror = None;
         tick(&mut p, &doc, 1, 0.0);
         assert_eq!(p.state_label().as_deref(), Some("Idle"));
+    }
+
+    /// The panel evaluates the pipeline: a Layer masked to `child` at weight
+    /// 1 puts the layer clip on the masked bone and leaves the root on the
+    /// base; a mask root the preview skeleton lacks is the status, anchored
+    /// like the runtime's refusal.
+    #[test]
+    fn a_layer_at_weight_one_changes_the_previews_masked_bones() {
+        let doc = layer_doc("child");
+        let mut p = AnimGraphPreview::default();
+        tick(&mut p, &doc, 1, 0.1);
+        assert_eq!(p.status, None);
+        assert_eq!(p.mesh.as_deref(), Some("b.mesh"));
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(near(bone_x(&p, 0), 2.0) && near(bone_x(&p, 1), 0.0), "aim 0: the base only");
+        assert!(p.apply(&AnimParamEdit::SetFloat("aim".into(), 1.0)));
+        tick(&mut p, &doc, 1, 0.1);
+        assert!(near(bone_x(&p, 1), 7.0), "child follows the layer: {}", bone_x(&p, 1));
+        assert!(near(bone_x(&p, 0), 2.0), "root stays on Idle");
+        assert_eq!(p.state_label().as_deref(), Some("Idle"));
+
+        let bad = layer_doc("nope");
+        tick(&mut p, &bad, 2, 0.1);
+        assert!(
+            p.status.as_deref().is_some_and(|s| s.contains("layer #22: bone 'nope' is not in the skeleton")),
+            "{:?}",
+            p.status
+        );
+        tick(&mut p, &doc, 3, 0.1);
+        assert_eq!(p.status, None, "fixed: the masks arm again");
+        assert!(near(bone_x(&p, 1), 7.0));
     }
 
     #[test]

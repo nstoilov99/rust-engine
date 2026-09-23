@@ -1,5 +1,5 @@
 (
-    version: 3,
+    version: 4,
     realm: Client,
     nodes: [
         (
@@ -178,7 +178,7 @@
             id: 14,
             type_id: "anim_ik_chain",
             type_version: 1,
-            position: (-693.0, 370.0),
+            position: (520.0, 0.0),
             properties: {
                 "ankle_offset": Float(0.1),
                 "bones": Str("mixamorig:LeftUpLeg, mixamorig:LeftLeg, mixamorig:LeftFoot"),
@@ -195,7 +195,7 @@
             id: 15,
             type_id: "anim_ik_chain",
             type_version: 1,
-            position: (-706.0, 660.0),
+            position: (780.0, 0.0),
             properties: {
                 "ankle_offset": Float(0.1),
                 "bones": Str("mixamorig:RightUpLeg, mixamorig:RightLeg, mixamorig:RightFoot"),
@@ -207,6 +207,53 @@
             subgraph: None,
             tint: None,
             title: Some("foot_r"),
+        ),
+        (
+            id: 16,
+            type_id: "anim_pipe_machine",
+            type_version: 1,
+            position: (0.0, 0.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+        (
+            id: 17,
+            type_id: "anim_pipe_output",
+            type_version: 1,
+            position: (1040.0, 0.0),
+            properties: {},
+            subgraph: None,
+            tint: None,
+            title: None,
+        ),
+        (
+            id: 18,
+            type_id: "anim_clip",
+            type_version: 1,
+            position: (260.0, -180.0),
+            properties: {
+                "clip": Asset("anims/Idle_1.anim"),
+                "speed": Float(1.0),
+            },
+            subgraph: None,
+            tint: None,
+            title: Some("Upper idle"),
+        ),
+        (
+            id: 19,
+            type_id: "anim_pipe_layer",
+            type_version: 1,
+            position: (260.0, 0.0),
+            properties: {
+                "bones": Str("mixamorig:Spine"),
+                "include_root": Bool(true),
+                "weight_param": Str("aim"),
+            },
+            subgraph: None,
+            tint: None,
+            title: Some("Upper body"),
         ),
     ],
     edges: [
@@ -312,6 +359,36 @@
             to_node: 1,
             to_pin: "in",
         ),
+        (
+            from_node: 14,
+            from_pin: "pose",
+            to_node: 15,
+            to_pin: "in",
+        ),
+        (
+            from_node: 15,
+            from_pin: "pose",
+            to_node: 17,
+            to_pin: "in",
+        ),
+        (
+            from_node: 16,
+            from_pin: "pose",
+            to_node: 19,
+            to_pin: "base",
+        ),
+        (
+            from_node: 18,
+            from_pin: "pose",
+            to_node: 19,
+            to_pin: "layer",
+        ),
+        (
+            from_node: 19,
+            from_pin: "pose",
+            to_node: 14,
+            to_pin: "in",
+        ),
     ],
     comments: [],
     groups: [],
@@ -347,6 +424,12 @@
             label: "Foot IK",
             ty: Float,
             default: Some(Float(1.0)),
+        ),
+        (
+            slug: "aim",
+            label: "Aim",
+            ty: Float,
+            default: Some(Float(0.0)),
         ),
     ],
     regions: {
